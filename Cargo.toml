@@ -34,3 +34,8 @@ portable-pty = "0.8"
 accessibility     = "0.2"
 accessibility-sys = "0.2"
 objc              = "0.2"
+axum         = { version = "0.7", features = ["macros"] }
+tower-http   = { version = "0.5", features = ["fs"] }
+tokio-stream = "0.1"
+maud         = { version = "0.26", features = ["axum"] }
+futures      = "0.3"
