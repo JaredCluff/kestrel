@@ -11,16 +11,16 @@ bincode            = { workspace = true }
 anyhow             = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
-tokio-tungstenite  = { version = "0.21", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite  = { workspace = true }
 tokio-rustls       = "0.24"
-rustls             = "0.21"
+rustls             = { workspace = true }
 rcgen              = "0.11"
-rand               = "0.8"
-futures-util       = "0.3"
-clap               = { version = "4", features = ["derive"] }
-toml               = "0.8"
-keyring            = "2"
-hex                = "0.4"
+rand               = { workspace = true }
+futures-util       = { workspace = true }
+clap               = { workspace = true }
+toml               = { workspace = true }
+keyring            = { workspace = true }
+hex                = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
