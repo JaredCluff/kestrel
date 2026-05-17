@@ -27,5 +27,10 @@ image  = { workspace = true }
 arboard      = { workspace = true }
 portable-pty = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility     = { workspace = true }
+accessibility-sys = { workspace = true }
+objc              = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
