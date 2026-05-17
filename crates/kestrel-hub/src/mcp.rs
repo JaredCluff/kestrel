@@ -94,6 +94,13 @@ pub struct ShellPtyArgs {
     pub pty_id: u32,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DescribeArgs {
+    pub node_id: String,
+    /// Display index (0-based). Currently ignored on the agent — always describes the focused app.
+    pub display: Option<u8>,
+}
+
 // ── Server ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -316,6 +323,23 @@ impl KestrelMcp {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+
+    // ── Phase 4 accessibility tool ────────────────────────────────────────────
+
+    #[tool(description = "Get the accessibility tree of the focused application on a node. Returns a JSON tree of UI elements with role, label, focused, enabled, and children. Requires Accessibility permission on macOS; returns {\"fallback\":true} if denied.")]
+    async fn describe(
+        &self,
+        Parameters(args): Parameters<DescribeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let tree = self
+            .registry
+            .describe(&args.node_id, args.display.unwrap_or(0))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&tree)
+            .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 
