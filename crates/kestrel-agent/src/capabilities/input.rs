@@ -3,8 +3,8 @@ use enigo::{Axis, Button as EnigoButton, Coordinate, Direction, Enigo, Key, Keyb
 use kestrel_proto::{Button, KeyCode, Modifiers, PressRelease};
 
 pub fn normalize_to_pixels(x: f64, y: f64, width: u32, height: u32) -> (i32, i32) {
-    let px = (x * width as f64).round() as i32;
-    let py = (y * height as f64).round() as i32;
+    let px = ((x * width as f64).round() as u32).min(width.saturating_sub(1)) as i32;
+    let py = ((y * height as f64).round() as u32).min(height.saturating_sub(1)) as i32;
     (px, py)
 }
 
@@ -115,18 +115,22 @@ pub async fn inject_key_event(
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| anyhow::anyhow!("enigo init: {e:?}"))?;
         let dir = to_enigo_dir(&action);
+        let is_ctrl  = matches!(key, KeyCode::Control);
+        let is_shift = matches!(key, KeyCode::Shift);
+        let is_alt   = matches!(key, KeyCode::Alt);
+        let is_meta  = matches!(key, KeyCode::Meta);
         if matches!(action, PressRelease::Press | PressRelease::Click) {
-            if mods.ctrl  { enigo.key(Key::Control, Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.shift { enigo.key(Key::Shift,   Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.alt   { enigo.key(Key::Alt,     Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.meta  { enigo.key(Key::Meta,    Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.ctrl  && !is_ctrl  { enigo.key(Key::Control, Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.shift && !is_shift { enigo.key(Key::Shift,   Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.alt   && !is_alt   { enigo.key(Key::Alt,     Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.meta  && !is_meta  { enigo.key(Key::Meta,    Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
         }
         enigo.key(to_enigo_key(&key), dir).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         if matches!(action, PressRelease::Release | PressRelease::Click) {
-            if mods.meta  { enigo.key(Key::Meta,    Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.alt   { enigo.key(Key::Alt,     Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.shift { enigo.key(Key::Shift,   Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.ctrl  { enigo.key(Key::Control, Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.meta  && !is_meta  { enigo.key(Key::Meta,    Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.alt   && !is_alt   { enigo.key(Key::Alt,     Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.shift && !is_shift { enigo.key(Key::Shift,   Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.ctrl  && !is_ctrl  { enigo.key(Key::Control, Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
         }
         Ok(())
     }).await.context("spawn_blocking panic")??;
@@ -211,7 +215,7 @@ mod tests {
     #[test]
     fn normalize_coords_clamp() {
         let (px, py) = normalize_to_pixels(1.0, 1.0, 1920, 1080);
-        assert_eq!(px, 1920);
-        assert_eq!(py, 1080);
+        assert_eq!(px, 1919);
+        assert_eq!(py, 1079);
     }
 }
