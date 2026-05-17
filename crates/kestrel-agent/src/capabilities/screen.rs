@@ -68,6 +68,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires Screen Recording permission (macOS TCC); run manually"]
     fn capture_display_0_returns_valid_png() {
         let png = capture_display(0).expect("capture should succeed on a machine with a display");
         assert!(!png.is_empty(), "PNG bytes must not be empty");
@@ -75,6 +76,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Screen Recording permission (macOS TCC); run manually"]
     fn list_displays_returns_at_least_one() {
         let displays = list_displays();
         assert!(!displays.is_empty(), "must find at least one display");
