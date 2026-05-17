@@ -15,7 +15,7 @@ tokio-tungstenite  = { workspace = true }
 rustls             = { workspace = true, features = ["dangerous_configuration"] }
 rand               = { workspace = true }
 futures-util       = { workspace = true }
-tokio-rustls       = "0.24"
+tokio-rustls       = { workspace = true }
 clap               = { workspace = true }
 toml               = { workspace = true }
 keyring            = { workspace = true }

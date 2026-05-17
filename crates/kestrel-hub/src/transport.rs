@@ -63,18 +63,15 @@ pub async fn connect(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<NodeConn> {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             let sent = Instant::now();
-            if tx
-                .send(Message::Binary(
-                    encode(&KestrelMessage {
-                        stream_id,
-                        kind: MsgKind::Request,
-                        payload: Payload::Ping,
-                    })
-                    .unwrap(),
-                ))
-                .await
-                .is_err()
-            {
+            let bytes = match encode(&KestrelMessage {
+                stream_id,
+                kind: MsgKind::Request,
+                payload: Payload::Ping,
+            }) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            if tx.send(Message::Binary(bytes)).await.is_err() {
                 break;
             }
             match rx.next().await {
