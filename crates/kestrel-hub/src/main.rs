@@ -5,6 +5,7 @@ use kestrel_hub::{
     enrollment,
     mcp::KestrelMcp,
     router::NodeRegistry,
+    supervisor,
     transport,
 };
 use rmcp::{ServiceExt, transport::stdio};
@@ -61,14 +62,13 @@ async fn main() -> anyhow::Result<()> {
             let psk = enrollment::load_psk()?;
             let registry = Arc::new(NodeRegistry::new());
 
+            // Spawn one supervisor per configured node. Each supervisor handles its own
+            // (re)connection lifecycle and emits status events to the registry's broadcast.
+            let mut supervisors = Vec::with_capacity(cfg.nodes.len());
             for node in &cfg.nodes {
-                match transport::connect(node.address, &psk).await {
-                    Ok((handle, _actor)) => {
-                        println!("connected: {} ({})", handle.node_id, handle.os_info.name);
-                        registry.register(handle).await;
-                    }
-                    Err(e) => tracing::error!("failed to connect to {}: {}", node.node_id, e),
-                }
+                let handle = supervisor::spawn(node.clone(), registry.clone(), psk.clone());
+                supervisors.push(handle);
+                println!("supervising: {} ({})", node.node_id, node.address);
             }
 
             kestrel_hub::kvm::start(cfg.layout.clone(), registry.clone());
@@ -79,6 +79,11 @@ async fn main() -> anyhow::Result<()> {
                 tracing::error!("MCP serve error: {e:?}");
             })?;
             service.waiting().await?;
+
+            // Best-effort cleanup — abort supervisors when MCP exits.
+            for s in supervisors {
+                s.abort();
+            }
         }
     }
     Ok(())
