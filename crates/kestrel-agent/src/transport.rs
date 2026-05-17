@@ -36,7 +36,13 @@ pub async fn serve(
         let _ = tx.send(bound);
     }
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::error!("accept error: {}", e);
+                continue;
+            }
+        };
         let acceptor = acceptor.clone();
         let psk = config.psk.clone();
         let node_id = config.node_id.clone();
@@ -75,6 +81,7 @@ async fn handle_conn(
         anyhow::bail!("expected AuthResponse, got other payload");
     };
     if !verify_response(&psk, &nonce, &mac) {
+        let _ = tx.send(Message::Close(None)).await;
         anyhow::bail!("auth failed: bad MAC from claimed node_id={}", claimed);
     }
     tracing::info!("hub authenticated (claimed node_id={})", claimed);
