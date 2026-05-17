@@ -37,7 +37,6 @@ pub fn spawn(
             match transport::connect(node_cfg.address, &psk).await {
                 Ok((handle, actor_join)) => {
                     registry.register(handle).await;
-                    attempt = 0;
                     // Wait for the actor to exit (connection closed / error).
                     let _ = actor_join.await;
                     attempt = 1;
