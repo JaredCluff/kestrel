@@ -40,7 +40,10 @@ async fn test_wrong_psk_fails() {
         connect(addr, &bad_psk),
     )
     .await;
-    assert!(result.is_err() || result.unwrap().is_err());
+    match result {
+        Err(_elapsed) => panic!("connect() with wrong PSK timed out — auth did not reject the connection"),
+        Ok(conn_result) => assert!(conn_result.is_err(), "expected connect() to fail with wrong PSK"),
+    }
 }
 
 #[tokio::test]
