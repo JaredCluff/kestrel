@@ -12,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use crate::capabilities::{input, screen};
+use crate::capabilities::{clipboard, input, screen, shell::ShellManager};
 use crate::config::AgentConfig;
 
 fn make_tls_config() -> Arc<ServerConfig> {
@@ -100,71 +100,141 @@ async fn handle_conn(
         },
     })?)).await?;
 
-    // Message loop
-    while let Some(frame) = rx.next().await {
-        let frame = frame?;
-        if !frame.is_binary() { continue; }
-        let km: KestrelMessage = decode(frame.into_data())?;
-        let stream_id = km.stream_id;
-        match km.payload {
-            Payload::Ping => {
-                tx.send(Message::Binary(encode(&KestrelMessage {
-                    stream_id, kind: MsgKind::Response, payload: Payload::Pong,
-                })?)).await?;
-            }
-            Payload::KeyEvent { key, modifiers, action } => {
-                if let Err(e) = input::inject_key_event(key, modifiers, action, 0, 0).await {
-                    tracing::warn!("key inject error: {}", e);
-                }
-            }
-            Payload::TypeText { text } => {
-                if let Err(e) = input::inject_text(text).await {
-                    tracing::warn!("type_text error: {}", e);
-                }
-            }
-            Payload::MouseMove { x, y } => {
-                let (w, h) = primary_display_dims();
-                if let Err(e) = input::inject_mouse_move(x, y, w, h).await {
-                    tracing::warn!("mouse_move error: {}", e);
-                }
-            }
-            Payload::MouseButton { button, action, x, y } => {
-                let (w, h) = primary_display_dims();
-                if let Err(e) = input::inject_mouse_button(button, action, x, y, w, h).await {
-                    tracing::warn!("mouse_button error: {}", e);
-                }
-            }
-            Payload::Scroll { dx, dy } => {
-                if let Err(e) = input::inject_scroll(dx, dy).await {
-                    tracing::warn!("scroll error: {}", e);
-                }
-            }
-            Payload::ScreenshotReq { display, region } => {
-                let result = tokio::task::spawn_blocking(move || {
-                    match region {
-                        Some(r) => screen::capture_region(display as usize, &r),
-                        None => screen::capture_display(display as usize),
+    // Shell event channel
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<KestrelMessage>();
+    let shell_mgr = ShellManager::new(event_tx);
+
+    // Message loop — select! on incoming frames and outgoing shell events
+    loop {
+        tokio::select! {
+            frame_result = rx.next() => {
+                let Some(frame_result) = frame_result else { break; };
+                let frame = frame_result?;
+                if !frame.is_binary() { continue; }
+                let km: KestrelMessage = decode(frame.into_data())?;
+                let stream_id = km.stream_id;
+
+                match km.payload {
+                    Payload::Ping => {
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response, payload: Payload::Pong,
+                        })?)).await?;
                     }
-                }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("panic: {e}")));
-                let payload = match result {
-                    Ok(png) => Payload::ScreenshotResp { png_bytes: png },
-                    Err(e) => {
-                        tracing::warn!("screenshot error: {}", e);
-                        Payload::ScreenshotResp { png_bytes: vec![] }
+                    Payload::KeyEvent { key, modifiers, action } => {
+                        if let Err(e) = input::inject_key_event(key, modifiers, action, 0, 0).await {
+                            tracing::warn!("key inject error: {}", e);
+                        }
                     }
-                };
-                tx.send(Message::Binary(encode(&KestrelMessage {
-                    stream_id, kind: MsgKind::Response, payload,
-                })?)).await?;
+                    Payload::TypeText { text } => {
+                        if let Err(e) = input::inject_text(text).await {
+                            tracing::warn!("type_text error: {}", e);
+                        }
+                    }
+                    Payload::MouseMove { x, y } => {
+                        let (w, h) = primary_display_dims();
+                        if let Err(e) = input::inject_mouse_move(x, y, w, h).await {
+                            tracing::warn!("mouse_move error: {}", e);
+                        }
+                    }
+                    Payload::MouseButton { button, action, x, y } => {
+                        let (w, h) = primary_display_dims();
+                        if let Err(e) = input::inject_mouse_button(button, action, x, y, w, h).await {
+                            tracing::warn!("mouse_button error: {}", e);
+                        }
+                    }
+                    Payload::Scroll { dx, dy } => {
+                        if let Err(e) = input::inject_scroll(dx, dy).await {
+                            tracing::warn!("scroll error: {}", e);
+                        }
+                    }
+                    Payload::ScreenshotReq { display, region } => {
+                        let result = tokio::task::spawn_blocking(move || {
+                            match region {
+                                Some(r) => screen::capture_region(display as usize, &r),
+                                None => screen::capture_display(display as usize),
+                            }
+                        }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("panic: {e}")));
+                        let payload = match result {
+                            Ok(png) => Payload::ScreenshotResp { png_bytes: png },
+                            Err(e) => {
+                                tracing::warn!("screenshot error: {}", e);
+                                Payload::ScreenshotResp { png_bytes: vec![] }
+                            }
+                        };
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response, payload,
+                        })?)).await?;
+                    }
+                    Payload::DescribeReq { .. } => {
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response,
+                            payload: Payload::DescribeResp { tree: AccessibilityNode::unavailable() },
+                        })?)).await?;
+                    }
+                    Payload::ClipboardReadReq => {
+                        let result = tokio::task::spawn_blocking(clipboard::read_clipboard)
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("panic: {e}")));
+                        let payload = match result {
+                            Ok(content) => Payload::ClipboardReadResp { content },
+                            Err(e) => {
+                                tracing::warn!("clipboard read error: {}", e);
+                                Payload::ClipboardReadResp {
+                                    content: kestrel_proto::ClipboardContent::Text(
+                                        format!("error: {e}")
+                                    ),
+                                }
+                            }
+                        };
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response, payload,
+                        })?)).await?;
+                    }
+                    Payload::ClipboardWriteReq { content } => {
+                        let result = tokio::task::spawn_blocking(move || clipboard::write_clipboard(content))
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow::anyhow!("panic: {e}")));
+                        if let Err(e) = result {
+                            tracing::warn!("clipboard write error: {}", e);
+                        }
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response, payload: Payload::ClipboardWriteAck,
+                        })?)).await?;
+                    }
+                    Payload::ShellSpawn { shell, cols, rows } => {
+                        let payload = match shell_mgr.spawn(shell, cols, rows) {
+                            Ok(pty_id) => Payload::ShellSpawned { pty_id },
+                            Err(e) => {
+                                tracing::warn!("shell spawn error: {}", e);
+                                Payload::ShellSpawned { pty_id: u32::MAX }
+                            }
+                        };
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response, payload,
+                        })?)).await?;
+                    }
+                    Payload::ShellWrite { pty_id, data } => {
+                        if let Err(e) = shell_mgr.write(pty_id, &data) {
+                            tracing::warn!("shell write error: {}", e);
+                        }
+                    }
+                    Payload::ShellResize { pty_id, cols, rows } => {
+                        if let Err(e) = shell_mgr.resize(pty_id, cols, rows) {
+                            tracing::warn!("shell resize error: {}", e);
+                        }
+                    }
+                    Payload::ShellClose { pty_id } => {
+                        shell_mgr.close(pty_id);
+                    }
+                    _ => {}
+                }
             }
-            Payload::DescribeReq { .. } => {
-                // Phase 4 will implement real AX tree; return fallback stub
-                tx.send(Message::Binary(encode(&KestrelMessage {
-                    stream_id, kind: MsgKind::Response,
-                    payload: Payload::DescribeResp { tree: AccessibilityNode::unavailable() },
-                })?)).await?;
+            event = event_rx.recv() => {
+                let Some(msg) = event else { break; };
+                if let Ok(bytes) = encode(&msg) {
+                    tx.send(Message::Binary(bytes)).await?;
+                }
             }
-            _ => {} // ignore unknown payloads
         }
     }
     Ok(())

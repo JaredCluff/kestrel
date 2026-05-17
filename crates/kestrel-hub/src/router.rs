@@ -1,7 +1,7 @@
 // crates/kestrel-hub/src/router.rs
 use std::collections::HashMap;
 use std::sync::Arc;
-use kestrel_proto::{Button, KeyCode, Modifiers, OsInfo, PressRelease, Rect};
+use kestrel_proto::{Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect};
 use tokio::sync::RwLock;
 
 use crate::transport::NodeHandle;
@@ -45,6 +45,8 @@ impl NodeRegistry {
             .ok_or_else(|| anyhow::anyhow!("node '{}' not connected", node_id))
     }
 
+    // ── Phase 2 ───────────────────────────────────────────────────────────────
+
     pub async fn screenshot(&self, node_id: &str, display: u8, region: Option<Rect>) -> anyhow::Result<Vec<u8>> {
         self.get(node_id).await?.screenshot(display, region).await
     }
@@ -76,7 +78,6 @@ impl NodeRegistry {
         self.get(node_id).await?.send_scroll(dx, dy).await
     }
 
-    /// Fire-and-forget mouse move — used by KVM, does not block.
     pub fn fire_mouse_move(&self, node_id: &str, x: f64, y: f64) {
         let registry = self.clone();
         let node_id = node_id.to_string();
@@ -85,6 +86,38 @@ impl NodeRegistry {
                 tracing::warn!("KVM mouse_move to {} failed: {}", node_id, e);
             }
         });
+    }
+
+    // ── Phase 3 clipboard ─────────────────────────────────────────────────────
+
+    pub async fn clipboard_read(&self, node_id: &str) -> anyhow::Result<ClipboardContent> {
+        self.get(node_id).await?.clipboard_read().await
+    }
+
+    pub async fn clipboard_write(&self, node_id: &str, content: ClipboardContent) -> anyhow::Result<()> {
+        self.get(node_id).await?.clipboard_write(content).await
+    }
+
+    // ── Phase 3 shell ─────────────────────────────────────────────────────────
+
+    pub async fn run_shell(&self, node_id: &str, command: &str) -> anyhow::Result<String> {
+        self.get(node_id).await?.run_shell(command).await
+    }
+
+    pub async fn shell_open(&self, node_id: &str, shell: Option<String>, cols: u16, rows: u16) -> anyhow::Result<u32> {
+        self.get(node_id).await?.spawn_shell(shell, cols, rows).await
+    }
+
+    pub async fn shell_write(&self, node_id: &str, pty_id: u32, data: Vec<u8>) -> anyhow::Result<()> {
+        self.get(node_id).await?.write_shell(pty_id, data).await
+    }
+
+    pub async fn shell_read(&self, node_id: &str, pty_id: u32) -> anyhow::Result<Vec<u8>> {
+        self.get(node_id).await?.read_shell_buffer(pty_id).await
+    }
+
+    pub async fn shell_close(&self, node_id: &str, pty_id: u32) -> anyhow::Result<()> {
+        self.get(node_id).await?.close_shell(pty_id).await
     }
 }
 

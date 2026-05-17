@@ -30,6 +30,18 @@ pub enum Payload {
     ScreenshotResp { png_bytes: Vec<u8> },
     DescribeReq { display: u8 },
     DescribeResp { tree: AccessibilityNode },
+    // Phase 3 — Clipboard (variants 14-17)
+    ClipboardReadReq,
+    ClipboardReadResp { content: ClipboardContent },
+    ClipboardWriteReq { content: ClipboardContent },
+    ClipboardWriteAck,
+    // Phase 3 — Shell (variants 18-23)
+    ShellSpawn { shell: Option<String>, cols: u16, rows: u16 },
+    ShellSpawned { pty_id: u32 },
+    ShellWrite { pty_id: u32, data: Vec<u8> },
+    ShellOutput { pty_id: u32, data: Vec<u8> },
+    ShellResize { pty_id: u32, cols: u16, rows: u16 },
+    ShellClose { pty_id: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +104,12 @@ impl AccessibilityNode {
             fallback: true,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ClipboardContent {
+    Text(String),
+    Image { png_bytes: Vec<u8>, width: u32, height: u32 },
 }
 
 #[cfg(test)]
@@ -205,6 +223,28 @@ mod tests {
                 display: 0,
                 region: Some(Rect { x: 0.1, y: 0.1, w: 0.8, h: 0.8 }),
             },
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_clipboard_text() {
+        let msg = KestrelMessage {
+            stream_id: 1,
+            kind: MsgKind::Request,
+            payload: Payload::ClipboardReadResp {
+                content: ClipboardContent::Text("hello clipboard".into()),
+            },
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_shell_output() {
+        let msg = KestrelMessage {
+            stream_id: 0,
+            kind: MsgKind::Event,
+            payload: Payload::ShellOutput { pty_id: 7, data: b"$ ls\n".to_vec() },
         };
         assert_eq!(roundtrip(&msg), msg);
     }

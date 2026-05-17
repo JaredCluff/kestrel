@@ -24,6 +24,8 @@ hex                = { workspace = true }
 enigo  = { workspace = true }
 xcap   = { workspace = true }
 image  = { workspace = true }
+arboard      = { workspace = true }
+portable-pty = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
