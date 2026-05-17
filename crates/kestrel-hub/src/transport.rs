@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use kestrel_proto::{
-    hmac_response, Button, KeyCode, KestrelMessage, Modifiers, MsgKind, OsInfo, Payload,
-    PressRelease, Rect,
+    ClipboardContent, hmac_response, Button, KeyCode, KestrelMessage, Modifiers, MsgKind,
+    OsInfo, Payload, PressRelease, Rect,
 };
 use rustls::ClientConfig;
 use tokio::net::TcpStream;
@@ -57,6 +57,14 @@ enum ActorCmd {
         msg: KestrelMessage,
         reply: oneshot::Sender<anyhow::Result<KestrelMessage>>,
     },
+    ReadShellBuffer {
+        pty_id: u32,
+        reply: oneshot::Sender<Vec<u8>>,
+    },
+    WaitShellClose {
+        pty_id: u32,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 type WsStream = WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
@@ -64,10 +72,12 @@ type WsStream = WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
     let (mut tx, mut rx) = ws.split();
     let mut pending: HashMap<u32, oneshot::Sender<anyhow::Result<KestrelMessage>>> = HashMap::new();
+    let mut shell_buffers: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut shell_close_waiters: HashMap<u32, oneshot::Sender<()>> = HashMap::new();
     let mut next_id: u32 = 1;
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    ping_interval.tick().await; // Skip immediate first tick
+    ping_interval.tick().await;
 
     loop {
         tokio::select! {
@@ -104,6 +114,13 @@ async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
                             }
                         }
                     }
+                    ActorCmd::ReadShellBuffer { pty_id, reply } => {
+                        let data = shell_buffers.remove(&pty_id).unwrap_or_default();
+                        let _ = reply.send(data);
+                    }
+                    ActorCmd::WaitShellClose { pty_id, reply } => {
+                        shell_close_waiters.insert(pty_id, reply);
+                    }
                 }
             }
             frame = rx.next() => {
@@ -111,6 +128,19 @@ async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
                 if !frame.is_binary() { continue; }
                 match decode(frame.into_data()) {
                     Ok(msg) => {
+                        // Handle streaming shell events (stream_id=0, no pending waiter)
+                        match &msg.payload {
+                            Payload::ShellOutput { pty_id, data } => {
+                                shell_buffers.entry(*pty_id).or_default().extend(data);
+                            }
+                            Payload::ShellClose { pty_id } => {
+                                if let Some(waiter) = shell_close_waiters.remove(pty_id) {
+                                    let _ = waiter.send(());
+                                }
+                            }
+                            _ => {}
+                        }
+                        // Route request-response pairs by stream_id
                         if let Some(r) = pending.remove(&msg.stream_id) {
                             let _ = r.send(Ok(msg));
                         }
@@ -122,6 +152,9 @@ async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
     }
     for (_, r) in pending {
         let _ = r.send(Err(anyhow::anyhow!("connection closed")));
+    }
+    for (_, w) in shell_close_waiters {
+        let _ = w.send(());
     }
 }
 
@@ -154,6 +187,8 @@ impl NodeHandle {
         Ok(reply_rx.await.map_err(|_| anyhow::anyhow!("actor dropped reply"))??)
     }
 
+    // ── Phase 2 input ──────────────────────────────────────────────────────────
+
     pub async fn send_key_event(&self, key: KeyCode, mods: Modifiers, action: PressRelease) -> anyhow::Result<()> {
         self.fire(Payload::KeyEvent { key, modifiers: mods, action }).await
     }
@@ -181,11 +216,86 @@ impl NodeHandle {
             _ => anyhow::bail!("expected ScreenshotResp, got other payload"),
         }
     }
+
+    // ── Phase 3 clipboard ─────────────────────────────────────────────────────
+
+    pub async fn clipboard_read(&self) -> anyhow::Result<ClipboardContent> {
+        let reply = self.request(Payload::ClipboardReadReq).await?;
+        match reply.payload {
+            Payload::ClipboardReadResp { content } => Ok(content),
+            _ => anyhow::bail!("expected ClipboardReadResp"),
+        }
+    }
+
+    pub async fn clipboard_write(&self, content: ClipboardContent) -> anyhow::Result<()> {
+        let reply = self.request(Payload::ClipboardWriteReq { content }).await?;
+        match reply.payload {
+            Payload::ClipboardWriteAck => Ok(()),
+            _ => anyhow::bail!("expected ClipboardWriteAck"),
+        }
+    }
+
+    // ── Phase 3 shell ─────────────────────────────────────────────────────────
+
+    pub async fn spawn_shell(&self, shell: Option<String>, cols: u16, rows: u16) -> anyhow::Result<u32> {
+        let reply = self.request(Payload::ShellSpawn { shell, cols, rows }).await?;
+        match reply.payload {
+            Payload::ShellSpawned { pty_id } => {
+                anyhow::ensure!(pty_id != u32::MAX, "agent failed to spawn shell");
+                Ok(pty_id)
+            }
+            _ => anyhow::bail!("expected ShellSpawned"),
+        }
+    }
+
+    pub async fn write_shell(&self, pty_id: u32, data: Vec<u8>) -> anyhow::Result<()> {
+        self.fire(Payload::ShellWrite { pty_id, data }).await
+    }
+
+    pub async fn resize_shell(&self, pty_id: u32, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.fire(Payload::ShellResize { pty_id, cols, rows }).await
+    }
+
+    pub async fn close_shell(&self, pty_id: u32) -> anyhow::Result<()> {
+        self.fire(Payload::ShellClose { pty_id }).await
+    }
+
+    pub async fn read_shell_buffer(&self, pty_id: u32) -> anyhow::Result<Vec<u8>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(ActorCmd::ReadShellBuffer { pty_id, reply: reply_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("actor channel closed"))?;
+        reply_rx.await.map_err(|_| anyhow::anyhow!("actor dropped reply"))
+    }
+
+    /// Spawn a shell, run `command`, wait for exit, return all output as UTF-8.
+    /// Timeout: 30 seconds.
+    pub async fn run_shell(&self, command: &str) -> anyhow::Result<String> {
+        let pty_id = self.spawn_shell(None, 80, 24).await?;
+
+        // Register close waiter BEFORE writing to avoid a race with fast-exiting commands.
+        let (close_tx, close_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(ActorCmd::WaitShellClose { pty_id, reply: close_tx })
+            .await
+            .map_err(|_| anyhow::anyhow!("actor channel closed"))?;
+
+        let cmd_bytes = format!("{}\nexit\n", command).into_bytes();
+        self.write_shell(pty_id, cmd_bytes).await?;
+
+        tokio::time::timeout(Duration::from_secs(30), close_rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("shell command timed out after 30s"))?
+            .map_err(|_| anyhow::anyhow!("actor dropped shell close waiter"))?;
+
+        let raw = self.read_shell_buffer(pty_id).await?;
+        Ok(String::from_utf8_lossy(&raw).into_owned())
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Connect to an agent, authenticate, and return a cloneable handle for sending commands.
 pub async fn connect(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<NodeHandle> {
     let tls = tls_connect(addr).await?;
     let url = format!("wss://{}", addr);
@@ -194,16 +304,13 @@ pub async fn connect(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<NodeHandle>
 
     let (node_id, os_info) = do_handshake(&mut tx, &mut rx, psk).await?;
 
-    // Reunite the split streams to hand to the actor
     let ws = tx.reunite(rx).expect("same stream");
-
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     tokio::spawn(run_actor(ws, cmd_rx));
 
     Ok(NodeHandle { node_id, os_info, cmd_tx })
 }
 
-/// Connect, authenticate, send one Ping, return RTT. Used by integration tests.
 pub async fn ping_once(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<Duration> {
     let handle = connect(addr, psk).await?;
     let sent = Instant::now();
