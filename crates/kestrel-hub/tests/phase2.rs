@@ -20,7 +20,7 @@ async fn start_agent(node_id: &str) -> SocketAddr {
 #[tokio::test]
 async fn test_screenshot_round_trip() {
     let addr = start_agent("screen-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     let png = handle.screenshot(0, None).await.unwrap();
     // On headless environments (no screen-recording permission) the agent returns
     // empty bytes rather than panicking — that is acceptable protocol behaviour.
@@ -41,7 +41,7 @@ async fn test_ping_pong_still_works_after_refactor() {
 async fn test_key_event_no_crash() {
     use kestrel_proto::{KeyCode, Modifiers, PressRelease};
     let addr = start_agent("key-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     handle.send_key_event(KeyCode::Char('a'), Modifiers::default(), PressRelease::Click)
         .await
         .unwrap();
@@ -54,7 +54,7 @@ async fn test_key_event_no_crash() {
 #[tokio::test]
 async fn test_type_text_no_crash() {
     let addr = start_agent("text-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     handle.send_type_text("hello".into()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     // Agent still alive

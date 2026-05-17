@@ -22,7 +22,7 @@ async fn test_describe_returns_valid_node() {
     // On a desktop with AX permission it returns the real focused app tree.
     // Either way the response must be a valid AccessibilityNode (no panic, no error).
     let addr = start_agent("ax-fallback-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     let tree = handle.describe(0).await.unwrap();
     assert!(!tree.role.is_empty(), "role must be non-empty even in fallback mode");
 }
@@ -32,7 +32,7 @@ async fn test_describe_returns_valid_node() {
 async fn test_describe_real_ax_tree() {
     // Grant Accessibility access to the terminal (or IDE) running this test, then un-ignore.
     let addr = start_agent("ax-real-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     let tree = handle.describe(0).await.unwrap();
     assert!(
         !tree.fallback,

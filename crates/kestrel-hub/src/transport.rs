@@ -306,7 +306,10 @@ impl NodeHandle {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-pub async fn connect(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<NodeHandle> {
+pub async fn connect(
+    addr: SocketAddr,
+    psk: &[u8],
+) -> anyhow::Result<(NodeHandle, tokio::task::JoinHandle<()>)> {
     let tls = tls_connect(addr).await?;
     let url = format!("wss://{}", addr);
     let (ws, _) = client_async(url, tls).await.context("WebSocket handshake")?;
@@ -316,13 +319,13 @@ pub async fn connect(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<NodeHandle>
 
     let ws = tx.reunite(rx).expect("same stream");
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    tokio::spawn(run_actor(ws, cmd_rx));
+    let actor_join = tokio::spawn(run_actor(ws, cmd_rx));
 
-    Ok(NodeHandle { node_id, os_info, cmd_tx })
+    Ok((NodeHandle { node_id, os_info, cmd_tx }, actor_join))
 }
 
 pub async fn ping_once(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<Duration> {
-    let handle = connect(addr, psk).await?;
+    let (handle, _actor) = connect(addr, psk).await?;
     let sent = Instant::now();
     handle.request(Payload::Ping).await?;
     Ok(sent.elapsed())

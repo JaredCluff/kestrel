@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = HubConfig::from_file(&config)?;
             let psk = enrollment::load_psk()?;
             for node in &cfg.nodes {
-                let conn = transport::connect(node.address, &psk).await?;
+                let (conn, _actor) = transport::connect(node.address, &psk).await?;
                 println!("connected: {} ({})", conn.node_id, conn.os_info.name);
             }
             tokio::signal::ctrl_c().await?;
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
 
             for node in &cfg.nodes {
                 match transport::connect(node.address, &psk).await {
-                    Ok(handle) => {
+                    Ok((handle, _actor)) => {
                         println!("connected: {} ({})", handle.node_id, handle.os_info.name);
                         registry.register(handle).await;
                     }
