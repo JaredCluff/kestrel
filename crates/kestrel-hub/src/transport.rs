@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use kestrel_proto::{
-    ClipboardContent, hmac_response, Button, KeyCode, KestrelMessage, Modifiers, MsgKind,
+    AccessibilityNode, ClipboardContent, hmac_response, Button, KeyCode, KestrelMessage, Modifiers, MsgKind,
     OsInfo, Payload, PressRelease, Rect,
 };
 use rustls::ClientConfig;
@@ -232,6 +232,16 @@ impl NodeHandle {
         match reply.payload {
             Payload::ClipboardWriteAck => Ok(()),
             _ => anyhow::bail!("expected ClipboardWriteAck"),
+        }
+    }
+
+    // ── Phase 4 accessibility ─────────────────────────────────────────────────
+
+    pub async fn describe(&self, display: u8) -> anyhow::Result<AccessibilityNode> {
+        let reply = self.request(Payload::DescribeReq { display }).await?;
+        match reply.payload {
+            Payload::DescribeResp { tree } => Ok(tree),
+            _ => anyhow::bail!("expected DescribeResp"),
         }
     }
 
