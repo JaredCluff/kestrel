@@ -10,12 +10,13 @@ pub fn list_displays() -> Vec<(usize, u32, u32)> {
     Monitor::all()
         .unwrap_or_default()
         .into_iter()
-        .enumerate()
-        .filter_map(|(i, m)| {
+        .filter_map(|m| {
             let w = m.width().ok()?;
             let h = m.height().ok()?;
-            Some((i, w, h))
+            Some((w, h))
         })
+        .enumerate()
+        .map(|(i, (w, h))| (i, w, h))
         .collect()
 }
 
@@ -33,6 +34,12 @@ pub fn capture_display(idx: usize) -> anyhow::Result<Vec<u8>> {
 /// Capture a normalized region `rect` of display `idx` and return PNG bytes.
 /// `rect` coordinates are 0.0..1.0 relative to the display dimensions.
 pub fn capture_region(idx: usize, rect: &Rect) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        rect.x >= 0.0 && rect.y >= 0.0 && rect.w > 0.0 && rect.h > 0.0
+            && rect.x + rect.w <= 1.0 && rect.y + rect.h <= 1.0,
+        "invalid rect: x={} y={} w={} h={} (all values must be in [0,1] with x+w≤1, y+h≤1)",
+        rect.x, rect.y, rect.w, rect.h
+    );
     let monitors = Monitor::all().context("xcap Monitor::all failed")?;
     let monitor = monitors
         .into_iter()
@@ -42,8 +49,9 @@ pub fn capture_region(idx: usize, rect: &Rect) -> anyhow::Result<Vec<u8>> {
     let h = monitor.height().context("height")?;
     let rx = (rect.x * w as f64).round() as u32;
     let ry = (rect.y * h as f64).round() as u32;
-    let rw = (rect.w * w as f64).round() as u32;
-    let rh = (rect.h * h as f64).round() as u32;
+    let rw = ((rect.w * w as f64).round() as u32).min(w.saturating_sub(rx));
+    let rh = ((rect.h * h as f64).round() as u32).min(h.saturating_sub(ry));
+    anyhow::ensure!(rw > 0 && rh > 0, "computed region is zero-sized (rw={}, rh={})", rw, rh);
     let img = monitor.capture_region(rx, ry, rw, rh).context("capture_region failed")?;
     encode_png(DynamicImage::ImageRgba8(img))
 }
