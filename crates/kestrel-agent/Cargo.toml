@@ -21,6 +21,9 @@ clap               = { workspace = true }
 toml               = { workspace = true }
 keyring            = { workspace = true }
 hex                = { workspace = true }
+enigo  = { workspace = true }
+xcap   = { workspace = true }
+image  = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
