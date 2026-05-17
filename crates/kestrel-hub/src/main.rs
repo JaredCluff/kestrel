@@ -2,6 +2,7 @@
 use clap::{Parser, Subcommand};
 use kestrel_hub::{
     config::HubConfig,
+    dashboard,
     enrollment,
     mcp::KestrelMcp,
     router::NodeRegistry,
@@ -73,6 +74,21 @@ async fn main() -> anyhow::Result<()> {
 
             kestrel_hub::kvm::start(cfg.layout.clone(), registry.clone());
 
+            // Start the dashboard HTTP server. Failure to bind is fatal because the user
+            // explicitly configured this address — surface the error rather than silently
+            // continuing without a dashboard.
+            let dash_listener = tokio::net::TcpListener::bind(cfg.listen_dashboard)
+                .await
+                .map_err(|e| anyhow::anyhow!("dashboard bind to {} failed: {}", cfg.listen_dashboard, e))?;
+            let dash_addr = dash_listener.local_addr()?;
+            let dash_registry = registry.clone();
+            let dashboard_handle = tokio::spawn(async move {
+                if let Err(e) = axum::serve(dash_listener, dashboard::router(dash_registry)).await {
+                    tracing::error!("dashboard server error: {}", e);
+                }
+            });
+            println!("Dashboard at http://{}", dash_addr);
+
             println!("Kestrel hub started. Serving MCP via stdio.");
             let mcp = KestrelMcp::new(registry);
             let service = mcp.serve(stdio()).await.inspect_err(|e| {
@@ -80,10 +96,11 @@ async fn main() -> anyhow::Result<()> {
             })?;
             service.waiting().await?;
 
-            // Best-effort cleanup — abort supervisors when MCP exits.
+            // Best-effort cleanup — abort supervisors and dashboard when MCP exits.
             for s in supervisors {
                 s.abort();
             }
+            dashboard_handle.abort();
         }
     }
     Ok(())
