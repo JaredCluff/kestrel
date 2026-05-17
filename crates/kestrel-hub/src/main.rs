@@ -34,6 +34,13 @@ enum Command {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
+    /// Append a new node to kestrel.toml. Restart `kestrel-hub start` to connect.
+    AddNode {
+        node_id: String,
+        address: String,
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+    },
 }
 
 #[tokio::main]
@@ -101,6 +108,46 @@ async fn main() -> anyhow::Result<()> {
                 s.abort();
             }
             dashboard_handle.abort();
+        }
+        Command::AddNode { node_id, address, config } => {
+            // Validate the address parses as SocketAddr before touching the file.
+            let _: std::net::SocketAddr = address.parse()
+                .map_err(|e| anyhow::anyhow!("invalid address '{}': {}", address, e))?;
+
+            let contents = std::fs::read_to_string(&config)
+                .map_err(|e| anyhow::anyhow!("read {}: {}", config, e))?;
+            let mut doc: toml::Value = toml::from_str(&contents)
+                .map_err(|e| anyhow::anyhow!("parse {}: {}", config, e))?;
+
+            // Navigate to hub.nodes (an array of inline tables in [[hub.nodes]] form).
+            let hub = doc.get_mut("hub")
+                .and_then(|v| v.as_table_mut())
+                .ok_or_else(|| anyhow::anyhow!("config has no [hub] section"))?;
+
+            let nodes = hub.entry("nodes")
+                .or_insert_with(|| toml::Value::Array(Vec::new()))
+                .as_array_mut()
+                .ok_or_else(|| anyhow::anyhow!("hub.nodes is not an array"))?;
+
+            // Refuse duplicates.
+            let duplicate = nodes.iter().any(|n| {
+                n.as_table().and_then(|t| t.get("node_id")).and_then(|v| v.as_str()) == Some(node_id.as_str())
+            });
+            if duplicate {
+                anyhow::bail!("node '{}' already exists in {}", node_id, config);
+            }
+
+            let mut entry = toml::value::Table::new();
+            entry.insert("node_id".into(), toml::Value::String(node_id.clone()));
+            entry.insert("address".into(), toml::Value::String(address.clone()));
+            nodes.push(toml::Value::Table(entry));
+
+            let serialized = toml::to_string_pretty(&doc)
+                .map_err(|e| anyhow::anyhow!("serialize TOML: {}", e))?;
+            std::fs::write(&config, serialized)
+                .map_err(|e| anyhow::anyhow!("write {}: {}", config, e))?;
+
+            println!("added '{}' at {}. restart `kestrel-hub start` to connect.", node_id, address);
         }
     }
     Ok(())
