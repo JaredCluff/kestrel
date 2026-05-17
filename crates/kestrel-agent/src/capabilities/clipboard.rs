@@ -8,9 +8,8 @@ use std::io::Cursor;
 
 pub fn read_clipboard() -> anyhow::Result<ClipboardContent> {
     let mut cb = Clipboard::new().context("arboard init")?;
-    match cb.get_text() {
-        Ok(text) => return Ok(ClipboardContent::Text(text)),
-        Err(_) => {}
+    if let Ok(text) = cb.get_text() {
+        return Ok(ClipboardContent::Text(text));
     }
     let img_data = cb.get_image().context("clipboard get_image")?;
     let width = img_data.width as u32;
