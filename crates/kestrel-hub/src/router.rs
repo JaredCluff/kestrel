@@ -1,7 +1,7 @@
 // crates/kestrel-hub/src/router.rs
 use std::collections::HashMap;
 use std::sync::Arc;
-use kestrel_proto::{Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect};
+use kestrel_proto::{AccessibilityNode, Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect};
 use tokio::sync::RwLock;
 
 use crate::transport::NodeHandle;
@@ -98,6 +98,12 @@ impl NodeRegistry {
         self.get(node_id).await?.clipboard_write(content).await
     }
 
+    // ── Phase 4 accessibility ─────────────────────────────────────────────────
+
+    pub async fn describe(&self, node_id: &str, display: u8) -> anyhow::Result<AccessibilityNode> {
+        self.get(node_id).await?.describe(display).await
+    }
+
     // ── Phase 3 shell ─────────────────────────────────────────────────────────
 
     pub async fn run_shell(&self, node_id: &str, command: &str) -> anyhow::Result<String> {
@@ -127,6 +133,15 @@ mod tests {
 
     #[test]
     fn registry_starts_empty() {
+        let r = NodeRegistry::new();
+        assert!(r.list_sync().is_empty());
+    }
+
+    #[test]
+    fn registry_has_describe_method() {
+        let _: fn(&NodeRegistry, &str, u8) -> _ = |r: &NodeRegistry, id: &str, d: u8| {
+            let _ = r.describe(id, d);
+        };
         let r = NodeRegistry::new();
         assert!(r.list_sync().is_empty());
     }
