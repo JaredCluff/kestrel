@@ -1035,6 +1035,7 @@ dependencies = [
  "rustls 0.21.12",
  "serde",
  "tokio",
+ "tokio-rustls 0.24.1",
  "tokio-tungstenite",
  "toml",
  "tracing",
