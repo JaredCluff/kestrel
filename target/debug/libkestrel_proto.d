@@ -1,0 +1,1 @@
+/Users/jared.cluff/gitrepos/kestrel/target/debug/libkestrel_proto.rlib: /Users/jared.cluff/gitrepos/kestrel/crates/kestrel-proto/src/auth.rs /Users/jared.cluff/gitrepos/kestrel/crates/kestrel-proto/src/lib.rs /Users/jared.cluff/gitrepos/kestrel/crates/kestrel-proto/src/message.rs

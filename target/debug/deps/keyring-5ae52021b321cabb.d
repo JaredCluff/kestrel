@@ -1,0 +1,11 @@
+/Users/jared.cluff/gitrepos/kestrel/target/debug/deps/keyring-5ae52021b321cabb.d: /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/lib.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/mock.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/macos.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/credential.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/error.rs
+
+/Users/jared.cluff/gitrepos/kestrel/target/debug/deps/libkeyring-5ae52021b321cabb.rlib: /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/lib.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/mock.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/macos.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/credential.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/error.rs
+
+/Users/jared.cluff/gitrepos/kestrel/target/debug/deps/libkeyring-5ae52021b321cabb.rmeta: /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/lib.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/mock.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/macos.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/credential.rs /Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/error.rs
+
+/Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/lib.rs:
+/Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/mock.rs:
+/Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/macos.rs:
+/Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/credential.rs:
+/Users/jared.cluff/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/keyring-2.3.3/src/error.rs:

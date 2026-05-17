@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/kestrel-proto",
+    "crates/kestrel-agent",
+    "crates/kestrel-hub",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio              = { version = "1", features = ["full"] }
+serde              = { version = "1", features = ["derive"] }
+bincode            = { version = "2", features = ["serde"] }
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
