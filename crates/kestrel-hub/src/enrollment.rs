@@ -45,7 +45,7 @@ mod tests {
     }
 
     #[test]
-    fn psk_hex_roundtrip() {
+    fn enrollment_command_hex_encoding() {
         let key = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
         let cmd = enrollment_command("10.0.0.1", &key);
         assert!(cmd.contains("deadbeef"));

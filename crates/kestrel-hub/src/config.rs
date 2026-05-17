@@ -41,11 +41,13 @@ impl HubConfig {
                 .hub
                 .nodes
                 .into_iter()
-                .map(|n| NodeConfig {
-                    node_id: n.node_id,
-                    address: n.address.parse().expect("invalid node address in config"),
+                .map(|n| -> anyhow::Result<NodeConfig> {
+                    Ok(NodeConfig {
+                        node_id: n.node_id,
+                        address: n.address.parse()?,
+                    })
                 })
-                .collect(),
+                .collect::<anyhow::Result<Vec<_>>>()?,
         })
     }
 
@@ -77,5 +79,19 @@ address = "192.168.1.10:7272"
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.nodes[0].node_id, "linux-dev");
         assert_eq!(cfg.nodes[1].address.port(), 7272);
+    }
+
+    #[test]
+    fn invalid_node_address_returns_err() {
+        let s = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+
+[[hub.nodes]]
+node_id = "bad-node"
+address = "not-a-valid-address"
+"#;
+        assert!(HubConfig::from_str(s).is_err());
     }
 }
