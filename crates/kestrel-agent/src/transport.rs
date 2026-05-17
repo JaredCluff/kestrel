@@ -1,14 +1,18 @@
+// crates/kestrel-agent/src/transport.rs
 use std::net::SocketAddr;
 use std::sync::Arc;
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
-use kestrel_proto::{verify_response, KestrelMessage, MsgKind, OsInfo, Payload};
+use kestrel_proto::{
+    verify_response, AccessibilityNode, DisplayInfo, KestrelMessage, MsgKind, OsInfo, Payload,
+};
 use rand::RngCore;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+use crate::capabilities::{input, screen};
 use crate::config::AgentConfig;
 
 fn make_tls_config() -> Arc<ServerConfig> {
@@ -38,10 +42,7 @@ pub async fn serve(
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(pair) => pair,
-            Err(e) => {
-                tracing::error!("accept error: {}", e);
-                continue;
-            }
+            Err(e) => { tracing::error!("accept error: {}", e); continue; }
         };
         let acceptor = acceptor.clone();
         let psk = config.psk.clone();
@@ -65,20 +66,19 @@ async fn handle_conn(
     let ws = accept_async(tls).await.context("WebSocket handshake failed")?;
     let (mut tx, mut rx) = ws.split();
 
-    // Send challenge
+    // Challenge
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
     tx.send(Message::Binary(encode(&KestrelMessage {
-        stream_id: 0,
-        kind: MsgKind::Event,
+        stream_id: 0, kind: MsgKind::Event,
         payload: Payload::Challenge { nonce },
     })?)).await?;
 
-    // Receive and verify AuthResponse
+    // Auth
     let raw = rx.next().await.context("no auth response from hub")??;
     let km: KestrelMessage = decode(raw.into_data())?;
     let Payload::AuthResponse { mac, node_id: claimed } = km.payload else {
-        anyhow::bail!("expected AuthResponse, got other payload");
+        anyhow::bail!("expected AuthResponse");
     };
     if !verify_response(&psk, &nonce, &mac) {
         let _ = tx.send(Message::Close(None)).await;
@@ -86,16 +86,16 @@ async fn handle_conn(
     }
     tracing::info!("hub authenticated (claimed node_id={})", claimed);
 
-    // Send SystemInfo (Ready signal)
+    // SystemInfo — populate real display list
+    let displays: Vec<DisplayInfo> = screen::list_displays()
+        .into_iter()
+        .map(|(i, w, h)| DisplayInfo { id: i as u8, width: w, height: h })
+        .collect();
     tx.send(Message::Binary(encode(&KestrelMessage {
-        stream_id: 0,
-        kind: MsgKind::Event,
+        stream_id: 0, kind: MsgKind::Event,
         payload: Payload::SystemInfo {
-            os: OsInfo {
-                name: std::env::consts::OS.into(),
-                version: "unknown".into(),
-            },
-            displays: vec![],
+            os: OsInfo { name: std::env::consts::OS.into(), version: "unknown".into() },
+            displays,
             hostname: node_id,
         },
     })?)).await?;
@@ -103,19 +103,79 @@ async fn handle_conn(
     // Message loop
     while let Some(frame) = rx.next().await {
         let frame = frame?;
-        if !frame.is_binary() {
-            continue;
-        }
+        if !frame.is_binary() { continue; }
         let km: KestrelMessage = decode(frame.into_data())?;
-        if matches!(km.payload, Payload::Ping) {
-            tx.send(Message::Binary(encode(&KestrelMessage {
-                stream_id: km.stream_id,
-                kind: MsgKind::Response,
-                payload: Payload::Pong,
-            })?)).await?;
+        let stream_id = km.stream_id;
+        match km.payload {
+            Payload::Ping => {
+                tx.send(Message::Binary(encode(&KestrelMessage {
+                    stream_id, kind: MsgKind::Response, payload: Payload::Pong,
+                })?)).await?;
+            }
+            Payload::KeyEvent { key, modifiers, action } => {
+                if let Err(e) = input::inject_key_event(key, modifiers, action, 0, 0).await {
+                    tracing::warn!("key inject error: {}", e);
+                }
+            }
+            Payload::TypeText { text } => {
+                if let Err(e) = input::inject_text(text).await {
+                    tracing::warn!("type_text error: {}", e);
+                }
+            }
+            Payload::MouseMove { x, y } => {
+                let (w, h) = primary_display_dims();
+                if let Err(e) = input::inject_mouse_move(x, y, w, h).await {
+                    tracing::warn!("mouse_move error: {}", e);
+                }
+            }
+            Payload::MouseButton { button, action, x, y } => {
+                let (w, h) = primary_display_dims();
+                if let Err(e) = input::inject_mouse_button(button, action, x, y, w, h).await {
+                    tracing::warn!("mouse_button error: {}", e);
+                }
+            }
+            Payload::Scroll { dx, dy } => {
+                if let Err(e) = input::inject_scroll(dx, dy).await {
+                    tracing::warn!("scroll error: {}", e);
+                }
+            }
+            Payload::ScreenshotReq { display, region } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    match region {
+                        Some(r) => screen::capture_region(display as usize, &r),
+                        None => screen::capture_display(display as usize),
+                    }
+                }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("panic: {e}")));
+                let payload = match result {
+                    Ok(png) => Payload::ScreenshotResp { png_bytes: png },
+                    Err(e) => {
+                        tracing::warn!("screenshot error: {}", e);
+                        Payload::ScreenshotResp { png_bytes: vec![] }
+                    }
+                };
+                tx.send(Message::Binary(encode(&KestrelMessage {
+                    stream_id, kind: MsgKind::Response, payload,
+                })?)).await?;
+            }
+            Payload::DescribeReq { .. } => {
+                // Phase 4 will implement real AX tree; return fallback stub
+                tx.send(Message::Binary(encode(&KestrelMessage {
+                    stream_id, kind: MsgKind::Response,
+                    payload: Payload::DescribeResp { tree: AccessibilityNode::unavailable() },
+                })?)).await?;
+            }
+            _ => {} // ignore unknown payloads
         }
     }
     Ok(())
+}
+
+fn primary_display_dims() -> (u32, u32) {
+    screen::list_displays()
+        .into_iter()
+        .next()
+        .map(|(_, w, h)| (w, h))
+        .unwrap_or((1920, 1080))
 }
 
 fn encode(msg: &KestrelMessage) -> anyhow::Result<Vec<u8>> {
