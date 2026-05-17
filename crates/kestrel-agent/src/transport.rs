@@ -166,9 +166,12 @@ async fn handle_conn(
                         })?)).await?;
                     }
                     Payload::DescribeReq { .. } => {
+                        let tree = tokio::task::spawn_blocking(crate::capabilities::ax::describe)
+                            .await
+                            .unwrap_or_else(|_| AccessibilityNode::unavailable());
                         tx.send(Message::Binary(encode(&KestrelMessage {
                             stream_id, kind: MsgKind::Response,
-                            payload: Payload::DescribeResp { tree: AccessibilityNode::unavailable() },
+                            payload: Payload::DescribeResp { tree },
                         })?)).await?;
                     }
                     Payload::ClipboardReadReq => {
