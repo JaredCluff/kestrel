@@ -40,6 +40,8 @@ pub fn parse_key_str(s: &str) -> anyhow::Result<KeyCode> {
         "f10" => KeyCode::F10,
         "f11" => KeyCode::F11,
         "f12" => KeyCode::F12,
+        "capslock" | "caps_lock" | "caps" => KeyCode::CapsLock,
+        "numlock" | "num_lock" | "numpad_lock" => KeyCode::NumLock,
         s if s.chars().count() == 1 => KeyCode::Char(s.chars().next().unwrap()),
         other => anyhow::bail!("unknown key: {}", other),
     })
