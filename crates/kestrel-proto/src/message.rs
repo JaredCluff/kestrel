@@ -43,16 +43,11 @@ mod tests {
 
     #[test]
     fn roundtrip_ping() {
-        let msg = KestrelMessage {
-            stream_id: 1,
-            kind: MsgKind::Request,
-            payload: Payload::Ping,
-        };
+        let msg = KestrelMessage { stream_id: 1, kind: MsgKind::Request, payload: Payload::Ping };
         let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (KestrelMessage, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
-        assert_eq!(decoded.stream_id, 1);
-        assert!(matches!(decoded.payload, Payload::Ping));
+        assert_eq!(decoded, msg);
     }
 
     #[test]
@@ -69,26 +64,35 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (KestrelMessage, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
-        let Payload::SystemInfo { hostname, .. } = decoded.payload else {
-            panic!("wrong payload variant");
-        };
-        assert_eq!(hostname, "dev-box");
+        assert_eq!(decoded, msg);
     }
 
     #[test]
     fn roundtrip_auth_challenge() {
-        let nonce = [0xABu8; 32];
         let msg = KestrelMessage {
             stream_id: 0,
-            kind: MsgKind::Event,
-            payload: Payload::Challenge { nonce },
+            kind: MsgKind::Request,
+            payload: Payload::Challenge { nonce: [0xABu8; 32] },
         };
         let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (KestrelMessage, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
-        let Payload::Challenge { nonce: decoded_nonce } = decoded.payload else {
-            panic!("wrong payload variant");
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn roundtrip_auth_response() {
+        let msg = KestrelMessage {
+            stream_id: 0,
+            kind: MsgKind::Response,
+            payload: Payload::AuthResponse {
+                mac: [0xDEu8; 32],
+                node_id: "hub".into(),
+            },
         };
-        assert_eq!(decoded_nonce, [0xABu8; 32]);
+        let bytes = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (KestrelMessage, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        assert_eq!(decoded, msg);
     }
 }
