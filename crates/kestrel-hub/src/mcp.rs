@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose};
-use kestrel_proto::{Button, KeyCode};
+use kestrel_proto::{Button, ClipboardContent, KeyCode};
 use rmcp::{
     ErrorData as McpError,
     ServerHandler,
@@ -13,6 +13,8 @@ use rmcp::{
 };
 
 use crate::router::NodeRegistry;
+
+// ── Arg types ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotArgs {
@@ -54,6 +56,46 @@ pub struct ScrollArgs {
     pub dy: f64,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NodeIdArgs {
+    pub node_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ClipboardWriteArgs {
+    pub node_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellRunArgs {
+    pub node_id: String,
+    pub command: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellOpenArgs {
+    pub node_id: String,
+    pub shell: Option<String>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellWriteArgs {
+    pub node_id: String,
+    pub pty_id: u32,
+    pub data: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ShellPtyArgs {
+    pub node_id: String,
+    pub pty_id: u32,
+}
+
+// ── Server ────────────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct KestrelMcp {
     registry: Arc<NodeRegistry>,
@@ -68,6 +110,8 @@ impl KestrelMcp {
             tool_router: Self::tool_router(),
         }
     }
+
+    // ── Phase 2 tools ─────────────────────────────────────────────────────────
 
     #[tool(description = "List all connected nodes with their OS and hostname")]
     async fn fleet_nodes(&self) -> Result<CallToolResult, McpError> {
@@ -169,6 +213,106 @@ impl KestrelMcp {
     ) -> Result<CallToolResult, McpError> {
         self.registry
             .scroll(&args.node_id, args.dx, args.dy)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+
+    // ── Phase 3 clipboard tools ───────────────────────────────────────────────
+
+    #[tool(description = "Read the clipboard text from a node. Returns the clipboard content as text.")]
+    async fn clipboard_read(
+        &self,
+        Parameters(args): Parameters<NodeIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let content = self.registry
+            .clipboard_read(&args.node_id)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let text = match content {
+            ClipboardContent::Text(t) => t,
+            ClipboardContent::Image { width, height, .. } => {
+                format!("[image {}x{}]", width, height)
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Write text to the clipboard on a node")]
+    async fn clipboard_write(
+        &self,
+        Parameters(args): Parameters<ClipboardWriteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.registry
+            .clipboard_write(&args.node_id, ClipboardContent::Text(args.text))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+
+    // ── Phase 3 shell tools ───────────────────────────────────────────────────
+
+    #[tool(description = "Run a shell command on a node and return its output. Timeout: 30 seconds.")]
+    async fn shell_run(
+        &self,
+        Parameters(args): Parameters<ShellRunArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let output = self.registry
+            .run_shell(&args.node_id, &args.command)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    #[tool(description = "Open an interactive PTY shell on a node. Returns a pty_id for subsequent writes/reads.")]
+    async fn shell_open(
+        &self,
+        Parameters(args): Parameters<ShellOpenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty_id = self.registry
+            .shell_open(
+                &args.node_id,
+                args.shell,
+                args.cols.unwrap_or(80),
+                args.rows.unwrap_or(24),
+            )
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(pty_id.to_string())]))
+    }
+
+    #[tool(description = "Write text to an interactive PTY shell opened with shell_open")]
+    async fn shell_write(
+        &self,
+        Parameters(args): Parameters<ShellWriteArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.registry
+            .shell_write(&args.node_id, args.pty_id, args.data.into_bytes())
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+
+    #[tool(description = "Read buffered output from an interactive PTY shell. Drains the buffer.")]
+    async fn shell_read(
+        &self,
+        Parameters(args): Parameters<ShellPtyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let raw = self.registry
+            .shell_read(&args.node_id, args.pty_id)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Close an interactive PTY shell opened with shell_open")]
+    async fn shell_close(
+        &self,
+        Parameters(args): Parameters<ShellPtyArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.registry
+            .shell_close(&args.node_id, args.pty_id)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
