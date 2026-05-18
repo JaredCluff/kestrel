@@ -1,0 +1,103 @@
+/* Kestrel dashboard — single hand-written stylesheet, no framework. */
+
+:root {
+    --bg: #0b0b0d;
+    --fg: #e6e6e6;
+    --muted: #6b6b6b;
+    --divider: #1f1f1f;
+    --accent: #6ea3e0;
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #fafafa;
+        --fg: #1a1a1a;
+        --muted: #8a8a8a;
+        --divider: #e6e6e6;
+        --accent: #2e6fb8;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    background: var(--bg);
+    color: var(--fg);
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 64px 32px;
+}
+
+header {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin: 0 0 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+}
+
+header .count {
+    font-variant-numeric: tabular-nums;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+tbody tr {
+    border-top: 1px solid var(--divider);
+}
+
+tbody tr:last-child {
+    border-bottom: 1px solid var(--divider);
+}
+
+td {
+    padding: 14px 0;
+    font-variant-numeric: tabular-nums;
+}
+
+td.id {
+    font-weight: 500;
+}
+
+td.status {
+    color: var(--muted);
+    width: 160px;
+}
+
+td.status .online {
+    color: var(--accent);
+}
+
+td.latency {
+    text-align: right;
+    color: var(--muted);
+    width: 80px;
+}
+
+td.empty {
+    color: var(--muted);
+    padding: 24px 0;
+    text-align: center;
+}

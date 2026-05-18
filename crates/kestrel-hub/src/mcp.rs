@@ -118,6 +118,21 @@ impl KestrelMcp {
         }
     }
 
+    /// Wrap a registry-level error with operation context and a remediation hint
+    /// when the failure mode is "node not connected".
+    fn node_err(op: &str, node_id: &str, e: anyhow::Error) -> McpError {
+        let msg = e.to_string();
+        let hint = if msg.contains("not connected") {
+            format!(" (hint: check that '{}' is online — see http://<hub>:dashboard or run `kestrel-hub status`)", node_id)
+        } else {
+            String::new()
+        };
+        McpError::internal_error(
+            format!("{op} on '{node_id}': {msg}{hint}"),
+            None,
+        )
+    }
+
     // ── Phase 2 tools ─────────────────────────────────────────────────────────
 
     #[tool(description = "List all connected nodes with their OS and hostname")]
@@ -137,7 +152,7 @@ impl KestrelMcp {
             .registry
             .screenshot(&args.node_id, args.display.unwrap_or(0), None)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("screenshot", &args.node_id, e))?;
         if png.is_empty() {
             return Err(McpError::internal_error(
                 "screenshot returned empty bytes".to_string(),
@@ -156,7 +171,7 @@ impl KestrelMcp {
         self.registry
             .type_text(&args.node_id, args.text)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("type_text", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -174,7 +189,7 @@ impl KestrelMcp {
         self.registry
             .key_combo(&args.node_id, keys)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("key_combo", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -186,7 +201,7 @@ impl KestrelMcp {
         self.registry
             .mouse_move(&args.node_id, args.x, args.y)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("mouse_move", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -209,7 +224,7 @@ impl KestrelMcp {
         self.registry
             .mouse_click(&args.node_id, button, args.x, args.y)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("mouse_click", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -221,7 +236,7 @@ impl KestrelMcp {
         self.registry
             .scroll(&args.node_id, args.dx, args.dy)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("scroll", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -235,7 +250,7 @@ impl KestrelMcp {
         let content = self.registry
             .clipboard_read(&args.node_id)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("clipboard_read", &args.node_id, e))?;
         let text = match content {
             ClipboardContent::Text(t) => t,
             ClipboardContent::Image { width, height, .. } => {
@@ -253,7 +268,7 @@ impl KestrelMcp {
         self.registry
             .clipboard_write(&args.node_id, ClipboardContent::Text(args.text))
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("clipboard_write", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -267,7 +282,7 @@ impl KestrelMcp {
         let output = self.registry
             .run_shell(&args.node_id, &args.command)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("shell_run", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -284,7 +299,7 @@ impl KestrelMcp {
                 args.rows.unwrap_or(24),
             )
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("shell_open", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text(pty_id.to_string())]))
     }
 
@@ -296,7 +311,7 @@ impl KestrelMcp {
         self.registry
             .shell_write(&args.node_id, args.pty_id, args.data.into_bytes())
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("shell_write", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -308,7 +323,7 @@ impl KestrelMcp {
         let raw = self.registry
             .shell_read(&args.node_id, args.pty_id)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("shell_read", &args.node_id, e))?;
         let text = String::from_utf8_lossy(&raw).into_owned();
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -321,7 +336,7 @@ impl KestrelMcp {
         self.registry
             .shell_close(&args.node_id, args.pty_id)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("shell_close", &args.node_id, e))?;
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -336,7 +351,7 @@ impl KestrelMcp {
             .registry
             .describe(&args.node_id, args.display.unwrap_or(0))
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            .map_err(|e| Self::node_err("describe", &args.node_id, e))?;
         let json = serde_json::to_string_pretty(&tree)
             .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -361,5 +376,30 @@ mod tests {
     fn mcp_server_constructs() {
         let registry = Arc::new(NodeRegistry::new());
         let _server = KestrelMcp::new(registry);
+    }
+
+    #[test]
+    fn node_err_includes_op_and_node_id() {
+        let e = anyhow::anyhow!("boom");
+        let mcp_err = KestrelMcp::node_err("screenshot", "macstudio", e);
+        let msg = format!("{:?}", mcp_err);
+        assert!(msg.contains("screenshot"), "expected op in error, got: {}", msg);
+        assert!(msg.contains("macstudio"), "expected node_id in error, got: {}", msg);
+    }
+
+    #[test]
+    fn node_err_appends_hint_when_not_connected() {
+        let e = anyhow::anyhow!("node 'mbp' not connected");
+        let mcp_err = KestrelMcp::node_err("shell_run", "mbp", e);
+        let msg = format!("{:?}", mcp_err);
+        assert!(msg.contains("hint:"), "expected remediation hint, got: {}", msg);
+    }
+
+    #[test]
+    fn node_err_no_hint_on_other_errors() {
+        let e = anyhow::anyhow!("websocket frame too large");
+        let mcp_err = KestrelMcp::node_err("screenshot", "macstudio", e);
+        let msg = format!("{:?}", mcp_err);
+        assert!(!msg.contains("hint:"), "did not expect hint for unrelated error, got: {}", msg);
     }
 }

@@ -20,7 +20,7 @@ async fn start_agent(node_id: &str) -> SocketAddr {
 #[tokio::test]
 async fn test_shell_run_echo() {
     let addr = start_agent("shell-echo-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     let output = handle.run_shell("echo kestrel-phase3-ok").await.unwrap();
     assert!(
         output.contains("kestrel-phase3-ok"),
@@ -32,7 +32,7 @@ async fn test_shell_run_echo() {
 #[tokio::test]
 async fn test_shell_interactive_open_write_read_close() {
     let addr = start_agent("shell-interactive-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
 
     let pty_id = handle.spawn_shell(None, 80, 24).await.unwrap();
 
@@ -55,7 +55,7 @@ async fn test_shell_interactive_open_write_read_close() {
 #[tokio::test]
 async fn test_shell_run_multiline() {
     let addr = start_agent("shell-multiline-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     let output = handle.run_shell("echo line1 && echo line2").await.unwrap();
     assert!(output.contains("line1"), "missing line1 in: {:?}", output);
     assert!(output.contains("line2"), "missing line2 in: {:?}", output);
@@ -65,7 +65,7 @@ async fn test_shell_run_multiline() {
 #[ignore = "requires display server / clipboard daemon; run manually"]
 async fn test_clipboard_text_roundtrip() {
     let addr = start_agent("clipboard-node").await;
-    let handle = connect(addr, &test_psk()).await.unwrap();
+    let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
     use kestrel_proto::ClipboardContent;
     handle.clipboard_write(ClipboardContent::Text("kestrel-clipboard-xyz".into())).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

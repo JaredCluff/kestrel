@@ -26,7 +26,7 @@ async fn start_agent(node_id: &str) -> SocketAddr {
 #[tokio::test]
 async fn test_auth_handshake_succeeds() {
     let addr = start_agent("test-node").await;
-    let conn = connect(addr, &test_psk()).await.unwrap();
+    let (conn, _actor) = connect(addr, &test_psk()).await.unwrap();
     assert_eq!(conn.node_id, "test-node");
     assert!(!conn.os_info.name.is_empty());
 }

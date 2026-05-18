@@ -1,9 +1,11 @@
 // crates/kestrel-hub/src/router.rs
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use kestrel_proto::{AccessibilityNode, Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect};
 use tokio::sync::RwLock;
 
+use crate::events::{NodeEvent, NodeState, NodeStatus};
 use crate::transport::NodeHandle;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -15,15 +17,34 @@ pub struct NodeInfo {
 #[derive(Clone)]
 pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeHandle>>>,
+    status: Arc<RwLock<HashMap<String, NodeStatus>>>,
+    event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
 
 impl NodeRegistry {
     pub fn new() -> Self {
-        NodeRegistry { nodes: Arc::new(RwLock::new(HashMap::new())) }
+        let (event_tx, _) = tokio::sync::broadcast::channel(64);
+        NodeRegistry {
+            nodes: Arc::new(RwLock::new(HashMap::new())),
+            status: Arc::new(RwLock::new(HashMap::new())),
+            event_tx,
+        }
     }
 
     pub async fn register(&self, handle: NodeHandle) {
-        self.nodes.write().await.insert(handle.node_id.clone(), handle);
+        let node_id = handle.node_id.clone();
+        let os = handle.os_info.clone();
+        self.status.write().await.insert(node_id.clone(), NodeStatus {
+            node_id: node_id.clone(),
+            state: NodeState::Online,
+            os: Some(os.clone()),
+            latency_ms: None,
+            last_seen: SystemTime::now(),
+            next_retry_in: None,
+        });
+        self.nodes.write().await.insert(node_id.clone(), handle);
+        // Broadcast errors only if there are no subscribers — that's fine, ignore.
+        let _ = self.event_tx.send(NodeEvent::Connected { node_id, os });
     }
 
     pub async fn list(&self) -> Vec<NodeInfo> {
@@ -43,6 +64,53 @@ impl NodeRegistry {
         self.nodes.read().await.get(node_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("node '{}' not connected", node_id))
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<NodeEvent> {
+        self.event_tx.subscribe()
+    }
+
+    pub async fn status_snapshot(&self) -> Vec<NodeStatus> {
+        let mut v: Vec<NodeStatus> = self.status.read().await.values().cloned().collect();
+        v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        v
+    }
+
+    pub async fn mark_disconnected(&self, node_id: &str, attempt: u32, next_retry_in: Duration) {
+        // Remove the dead handle so MCP calls fail fast.
+        self.nodes.write().await.remove(node_id);
+        if let Some(s) = self.status.write().await.get_mut(node_id) {
+            s.state = NodeState::Offline;
+            s.next_retry_in = Some(next_retry_in);
+            s.last_seen = SystemTime::now();
+        }
+        let _ = self.event_tx.send(NodeEvent::Disconnected {
+            node_id: node_id.to_string(),
+            attempt,
+            next_retry_in,
+        });
+    }
+
+    pub async fn mark_reconnecting(&self, node_id: &str, attempt: u32) {
+        {
+            let mut status = self.status.write().await;
+            if let Some(s) = status.get_mut(node_id) {
+                s.state = NodeState::Reconnecting;
+            } else {
+                status.insert(node_id.to_string(), NodeStatus {
+                    node_id: node_id.to_string(),
+                    state: NodeState::Reconnecting,
+                    os: None,
+                    latency_ms: None,
+                    last_seen: SystemTime::now(),
+                    next_retry_in: None,
+                });
+            }
+        }
+        let _ = self.event_tx.send(NodeEvent::Reconnecting {
+            node_id: node_id.to_string(),
+            attempt,
+        });
     }
 
     // ── Phase 2 ───────────────────────────────────────────────────────────────
@@ -130,6 +198,8 @@ impl NodeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{NodeEvent, NodeState};
+    use std::time::Duration;
 
     #[test]
     fn registry_starts_empty() {
@@ -144,5 +214,42 @@ mod tests {
         };
         let r = NodeRegistry::new();
         assert!(r.list_sync().is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscribe_receives_disconnect_event() {
+        let r = NodeRegistry::new();
+        let mut rx = r.subscribe();
+        r.mark_disconnected("a", 2, Duration::from_secs(4)).await;
+        let evt = rx.recv().await.unwrap();
+        match evt {
+            NodeEvent::Disconnected { node_id, attempt, next_retry_in } => {
+                assert_eq!(node_id, "a");
+                assert_eq!(attempt, 2);
+                assert_eq!(next_retry_in, Duration::from_secs(4));
+            }
+            _ => panic!("expected Disconnected, got {:?}", evt),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_includes_reconnecting() {
+        let r = NodeRegistry::new();
+        r.mark_reconnecting("a", 1).await;
+        let snap = r.status_snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].node_id, "a");
+        assert_eq!(snap[0].state, NodeState::Reconnecting);
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_sorted_by_node_id() {
+        let r = NodeRegistry::new();
+        r.mark_reconnecting("b", 1).await;
+        r.mark_reconnecting("a", 1).await;
+        r.mark_reconnecting("c", 1).await;
+        let snap = r.status_snapshot().await;
+        let ids: Vec<&str> = snap.iter().map(|s| s.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 }
