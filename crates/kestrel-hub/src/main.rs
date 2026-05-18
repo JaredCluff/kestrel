@@ -38,23 +38,30 @@ enum Command {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
-    /// Append a new node to kestrel.toml. Restart `kestrel-hub start` to connect.
+    /// Append a node to kestrel.toml. If the hub is running, applies live;
+    /// otherwise the change takes effect at next `start`.
     AddNode {
         node_id: String,
         address: String,
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
+        /// Hub control URL (HTTP). If reachable, the change applies live.
+        #[arg(long, default_value = "http://127.0.0.1:7273")]
+        hub: String,
     },
     /// Print configured nodes from kestrel.toml.
     ListNodes {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
-    /// Remove a node from kestrel.toml.
+    /// Remove a node from kestrel.toml. If the hub is running, applies live.
     RemoveNode {
         node_id: String,
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
+        /// Hub control URL (HTTP). If reachable, the change applies live.
+        #[arg(long, default_value = "http://127.0.0.1:7273")]
+        hub: String,
     },
     /// Set or update a KVM layout entry for a node.
     LayoutSet {
@@ -163,13 +170,26 @@ async fn main() -> anyhow::Result<()> {
             }
             dashboard_handle.abort();
         }
-        Command::AddNode { node_id, address, config } => {
-            let address: std::net::SocketAddr = address.parse()
+        Command::AddNode { node_id, address, config, hub } => {
+            // Validate the address once up front so we get a clean error before any I/O.
+            let parsed_addr: std::net::SocketAddr = address.parse()
                 .map_err(|e| anyhow::anyhow!("invalid address '{}': {}", address, e))?;
-            let mut doc = kestrel_hub::config::load_doc(&config)?;
-            kestrel_hub::config::add_node(&mut doc, &node_id, address)?;
-            kestrel_hub::config::save_doc(&config, &doc)?;
-            println!("added '{}' at {}. restart `kestrel-hub start` to connect.", node_id, address);
+
+            // Try HTTP first — the running hub will write the file itself.
+            let client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            match client.add_node(&node_id, &address).await {
+                Ok(_status) => {
+                    println!("added '{}' at {} (live via {}).", node_id, parsed_addr, hub);
+                }
+                Err(e) => {
+                    // Hub unreachable — fall back to local file mutation.
+                    tracing::debug!("hub not reachable ({}), writing file directly", e);
+                    let mut doc = kestrel_hub::config::load_doc(&config)?;
+                    kestrel_hub::config::add_node(&mut doc, &node_id, parsed_addr)?;
+                    kestrel_hub::config::save_doc(&config, &doc)?;
+                    println!("added '{}' at {}. start `kestrel-hub start` (or restart it) to connect.", node_id, parsed_addr);
+                }
+            }
         }
         Command::ListNodes { config } => {
             let cfg = HubConfig::from_file(&config)?;
@@ -181,11 +201,20 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::RemoveNode { node_id, config } => {
-            let mut doc = kestrel_hub::config::load_doc(&config)?;
-            kestrel_hub::config::remove_node(&mut doc, &node_id)?;
-            kestrel_hub::config::save_doc(&config, &doc)?;
-            println!("removed '{}'.", node_id);
+        Command::RemoveNode { node_id, config, hub } => {
+            let client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            match client.remove_node(&node_id).await {
+                Ok(()) => {
+                    println!("removed '{}' (live via {}).", node_id, hub);
+                }
+                Err(e) => {
+                    tracing::debug!("hub not reachable ({}), writing file directly", e);
+                    let mut doc = kestrel_hub::config::load_doc(&config)?;
+                    kestrel_hub::config::remove_node(&mut doc, &node_id)?;
+                    kestrel_hub::config::save_doc(&config, &doc)?;
+                    println!("removed '{}' from {}. (hub not running)", node_id, config);
+                }
+            }
         }
         Command::LayoutSet { node_id, col, row, config } => {
             let mut doc = kestrel_hub::config::load_doc(&config)?;
