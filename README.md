@@ -19,6 +19,11 @@ Back on the hub, register each node and start the hub:
     kestrel-hub add-node macstudio 192.168.1.10:7272
     kestrel-hub add-node linux-dev 192.168.1.20:7272
     kestrel-hub status                         # one-shot reachability check
+
+> **Hot-reload:** `add-node` and `remove-node` apply live against a running hub
+> (via its HTTP control endpoint at `:7273`). If the hub is down, the change
+> takes effect at next `start`. Pass `--hub <url>` to target a non-local hub.
+
     kestrel-hub start                          # serves MCP via stdio + dashboard at :7273
 
 In another terminal (or another host):
@@ -34,8 +39,8 @@ In another terminal (or another host):
 | `init` | Generate PSK, store in keyring, scaffold `kestrel.toml` |
 | `connect` | One-shot test: connect to each configured node, then exit |
 | `start` | Long-running: supervisors + KVM + dashboard + MCP-on-stdio |
-| `add-node <id> <addr>` | Append `[[hub.nodes]]` to config |
-| `remove-node <id>` | Remove a node from config |
+| `add-node <id> <addr>` | Append `[[hub.nodes]]` to config; applies live if hub is running |
+| `remove-node <id>` | Remove a node from config; applies live if hub is running |
 | `list-nodes` | Print configured nodes |
 | `status` | Probe each configured node (one ping per node) |
 | `layout-set <id> <col> <row>` | Set/update KVM grid position |
