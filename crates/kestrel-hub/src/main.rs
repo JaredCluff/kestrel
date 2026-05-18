@@ -70,6 +70,14 @@ enum Command {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
+    /// Probe each configured node once and print reachability.
+    Status {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        /// Per-node timeout in seconds.
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+    },
 }
 
 #[tokio::main]
@@ -182,6 +190,30 @@ async fn main() -> anyhow::Result<()> {
             kestrel_hub::config::remove_layout(&mut doc, &node_id)?;
             kestrel_hub::config::save_doc(&config, &doc)?;
             println!("layout cleared for '{}'.", node_id);
+        }
+        Command::Status { config, timeout } => {
+            let cfg = HubConfig::from_file(&config)?;
+            let psk = enrollment::load_psk()?;
+            if cfg.nodes.is_empty() {
+                println!("(no nodes configured)");
+            } else {
+                for node in &cfg.nodes {
+                    let probe = kestrel_hub::status::probe_node(
+                        node,
+                        &psk,
+                        std::time::Duration::from_secs(timeout),
+                    )
+                    .await;
+                    match probe.result {
+                        kestrel_hub::status::NodeProbeResult::Reachable { rtt } => {
+                            println!("{:<24} {:<24} online   {}ms", probe.node_id, probe.address, rtt.as_millis());
+                        }
+                        kestrel_hub::status::NodeProbeResult::Unreachable { reason } => {
+                            println!("{:<24} {:<24} offline  ({})", probe.node_id, probe.address, reason);
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
