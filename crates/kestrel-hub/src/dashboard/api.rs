@@ -14,7 +14,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::events::{NodeEvent, NodeState, NodeStatus};
 use crate::router::NodeRegistry;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NodeStatusDto {
     pub node_id: String,
     pub state: NodeStateDto,
@@ -24,7 +24,7 @@ pub struct NodeStatusDto {
     pub next_retry_in_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStateDto {
     Online,
@@ -53,7 +53,7 @@ impl From<&NodeStatus> for NodeStatusDto {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NodeEventDto {
     Connected {
