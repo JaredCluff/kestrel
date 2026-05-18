@@ -122,12 +122,14 @@ async fn main() -> anyhow::Result<()> {
             let psk = enrollment::load_psk()?;
             let registry = Arc::new(NodeRegistry::new());
 
+            // Build the shared application state; supervisor handles go in `state.supervisors`.
+            let state = dashboard::AppState::new(registry.clone(), config.clone(), psk.clone());
+
             // Spawn one supervisor per configured node. Each supervisor handles its own
             // (re)connection lifecycle and emits status events to the registry's broadcast.
-            let mut supervisors = Vec::with_capacity(cfg.nodes.len());
             for node in &cfg.nodes {
                 let handle = supervisor::spawn(node.clone(), registry.clone(), psk.clone());
-                supervisors.push(handle);
+                state.supervisors.write().await.insert(node.node_id.clone(), handle);
                 println!("supervising: {} ({})", node.node_id, node.address);
             }
 
@@ -140,9 +142,9 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("dashboard bind to {} failed: {}", cfg.listen_dashboard, e))?;
             let dash_addr = dash_listener.local_addr()?;
-            let dash_registry = registry.clone();
+            let dash_state = state.clone();
             let dashboard_handle = tokio::spawn(async move {
-                if let Err(e) = axum::serve(dash_listener, dashboard::router(dash_registry)).await {
+                if let Err(e) = axum::serve(dash_listener, dashboard::router(dash_state)).await {
                     tracing::error!("dashboard server error: {}", e);
                 }
             });
@@ -156,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
             service.waiting().await?;
 
             // Best-effort cleanup — abort supervisors and dashboard when MCP exits.
-            for s in supervisors {
-                s.abort();
+            for (_, h) in state.supervisors.write().await.drain() {
+                h.abort();
             }
             dashboard_handle.abort();
         }
