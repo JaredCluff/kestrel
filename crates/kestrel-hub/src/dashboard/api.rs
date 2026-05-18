@@ -132,7 +132,7 @@ use crate::config::{add_node, load_doc, remove_node, save_doc};
 use crate::dashboard::AppState;
 use crate::supervisor;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct AddNodeBody {
     pub node_id: String,
     pub address: String,

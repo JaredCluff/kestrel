@@ -1,4 +1,5 @@
 pub mod capabilities_parse;
+pub mod client;
 pub mod config;
 pub mod dashboard;
 pub mod enrollment;

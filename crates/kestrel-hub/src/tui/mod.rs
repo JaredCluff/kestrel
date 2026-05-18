@@ -11,9 +11,9 @@ use futures::stream::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-pub mod client;
 pub mod view;
 
+use crate::client::HubClient;
 use crate::dashboard::api::NodeStatusDto;
 
 #[derive(Debug, Clone)]
@@ -41,7 +41,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: TuiArgs,
 ) -> anyhow::Result<()> {
-    let client = client::HubClient::new(args.hub_url);
+    let client = HubClient::new(args.hub_url);
     let mut nodes: Vec<NodeStatusDto> = client.fetch_nodes().await.unwrap_or_default();
     let mut events = Box::pin(client.subscribe_events());
 
