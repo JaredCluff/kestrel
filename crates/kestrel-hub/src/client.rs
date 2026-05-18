@@ -13,6 +13,8 @@ use crate::dashboard::api::{AddNodeBody, NodeEventDto, NodeStatusDto};
 pub struct HubClient {
     base_url: String,
     http: reqwest::Client,
+    /// Bearer token sent on mutation endpoints. Read-only endpoints don't require it.
+    token: Option<String>,
 }
 
 impl HubClient {
@@ -25,6 +27,7 @@ impl HubClient {
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("reqwest client"),
+            token: None,
         }
     }
 
@@ -38,7 +41,14 @@ impl HubClient {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("reqwest client"),
+            token: None,
         }
+    }
+
+    /// Builder-style: attach a Bearer token used on POST/DELETE mutation calls.
+    pub fn with_token(mut self, token: String) -> Self {
+        self.token = Some(token);
+        self
     }
 
     pub async fn fetch_nodes(&self) -> anyhow::Result<Vec<NodeStatusDto>> {
@@ -81,16 +91,14 @@ impl HubClient {
     /// POST /api/nodes — returns the created node's initial status.
     pub async fn add_node(&self, node_id: &str, address: &str) -> anyhow::Result<NodeStatusDto> {
         let url = format!("{}/api/nodes", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&AddNodeBody {
-                node_id: node_id.into(),
-                address: address.into(),
-            })
-            .send()
-            .await
-            .with_context(|| format!("POST {}", url))?;
+        let mut req = self.http.post(&url).json(&AddNodeBody {
+            node_id: node_id.into(),
+            address: address.into(),
+        });
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.with_context(|| format!("POST {}", url))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -111,12 +119,11 @@ impl HubClient {
     /// DELETE /api/nodes/{node_id}.
     pub async fn remove_node(&self, node_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/api/nodes/{}", self.base_url, node_id);
-        let resp = self
-            .http
-            .delete(&url)
-            .send()
-            .await
-            .with_context(|| format!("DELETE {}", url))?;
+        let mut req = self.http.delete(&url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.with_context(|| format!("DELETE {}", url))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();

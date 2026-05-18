@@ -12,6 +12,18 @@ use kestrel_hub::{
 use rmcp::{ServiceExt, transport::stdio};
 use std::sync::Arc;
 
+/// Resolve the hub control token for the CLI. Priority: `$KESTREL_TOKEN` env var,
+/// then local keyring (set by `kestrel-hub init` on this machine), then None.
+/// `None` is fine for hubs running in legacy/no-auth mode.
+fn resolve_control_token() -> Option<String> {
+    if let Ok(t) = std::env::var("KESTREL_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    enrollment::load_control_token().ok()
+}
+
 #[derive(Parser)]
 #[command(name = "kestrel-hub", about = "Kestrel fleet hub")]
 struct Cli {
@@ -101,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Init { bind, config, dashboard } => {
             let psk = enrollment::generate_psk();
             enrollment::store_psk(&psk)?;
+            let token = enrollment::generate_control_token();
+            enrollment::store_control_token(&token)?;
             match enrollment::scaffold_hub_config(&config, &dashboard) {
                 Ok(()) => println!("Wrote starter config: {}", config),
                 Err(e) => {
@@ -111,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
             println!("Key generated and stored in system credential store.");
             println!("Run this on each node machine:");
             println!("  {}", enrollment::enrollment_command(&bind, &psk));
+            println!();
+            println!("Hub control token (stored in keyring; for remote `kestrel-hub add-node --hub <url>` calls):");
+            println!("  export KESTREL_TOKEN={}", token);
             println!();
             println!("Then on this hub: kestrel-hub add-node <id> <addr> && kestrel-hub start");
         }
@@ -130,7 +147,20 @@ async fn main() -> anyhow::Result<()> {
             let registry = Arc::new(NodeRegistry::new());
 
             // Build the shared application state; supervisor handles go in `state.supervisors`.
+            // Load the control token from the keyring if it's there; absent token means
+            // legacy/no-auth mode (init upgrades this on next run).
             let state = dashboard::AppState::new(registry.clone(), config.clone(), psk.clone());
+            let state = match enrollment::load_control_token() {
+                Ok(token) => state.with_control_token(token),
+                Err(e) => {
+                    tracing::warn!(
+                        "no control token in keyring ({}); mutation endpoints unauthenticated. \
+                         Run `kestrel-hub init` again to regenerate.",
+                        e
+                    );
+                    state
+                }
+            };
 
             // Spawn one supervisor per configured node. Each supervisor handles its own
             // (re)connection lifecycle and emits status events to the registry's broadcast.
@@ -176,7 +206,10 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("invalid address '{}': {}", address, e))?;
 
             // Try HTTP first — the running hub will write the file itself.
-            let client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            let mut client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            if let Some(t) = resolve_control_token() {
+                client = client.with_token(t);
+            }
             match client.add_node(&node_id, &address).await {
                 Ok(_status) => {
                     println!("added '{}' at {} (live via {}).", node_id, parsed_addr, hub);
@@ -202,7 +235,10 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::RemoveNode { node_id, config, hub } => {
-            let client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            let mut client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            if let Some(t) = resolve_control_token() {
+                client = client.with_token(t);
+            }
             match client.remove_node(&node_id).await {
                 Ok(()) => {
                     println!("removed '{}' (live via {}).", node_id, hub);

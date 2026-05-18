@@ -138,12 +138,35 @@ pub struct AddNodeBody {
     pub address: String,
 }
 
+/// Check the `Authorization: Bearer <token>` header against the configured
+/// control token. If the state has no `control_token`, auth is disabled.
+fn check_auth(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    let Some(expected) = state.control_token.as_deref() else {
+        return Ok(()); // auth disabled
+    };
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match provided {
+        Some(t) if t == expected => Ok(()),
+        Some(_) => Err((StatusCode::UNAUTHORIZED, "invalid control token".into())),
+        None => Err((StatusCode::UNAUTHORIZED, "missing Authorization: Bearer header".into())),
+    }
+}
+
 /// POST /api/nodes — body: { node_id, address }
 /// Atomically (under config_write_lock): mutates config file, spawns supervisor.
+/// Requires `Authorization: Bearer <control_token>` when auth is enabled.
 pub async fn post_node(
     axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<AddNodeBody>,
 ) -> Result<(StatusCode, axum::Json<NodeStatusDto>), (StatusCode, String)> {
+    check_auth(&state, &headers)?;
     let address: std::net::SocketAddr = body.address.parse()
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid address: {}", e)))?;
 
@@ -177,10 +200,13 @@ pub async fn post_node(
 
 /// DELETE /api/nodes/:node_id
 /// Atomically (under config_write_lock): mutates config file, aborts supervisor, forgets node.
+/// Requires `Authorization: Bearer <control_token>` when auth is enabled.
 pub async fn delete_node(
     axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
     Path(node_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
     let _lock = state.config_write_lock.lock().await;
 
     let mut doc = load_doc(&state.config_path)

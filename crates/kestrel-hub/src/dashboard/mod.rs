@@ -28,6 +28,9 @@ pub struct AppState {
     pub supervisors: SupervisorMap,
     /// Serializes config file read-modify-write cycles across concurrent HTTP requests.
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Bearer token required on mutation endpoints (POST/DELETE /api/nodes).
+    /// `None` means auth is disabled — the read-only endpoints stay open either way.
+    pub control_token: Option<String>,
 }
 
 impl AppState {
@@ -42,7 +45,14 @@ impl AppState {
             psk,
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            control_token: None,
         }
+    }
+
+    /// Builder-style: require a Bearer token on mutation endpoints.
+    pub fn with_control_token(mut self, token: String) -> Self {
+        self.control_token = Some(token);
+        self
     }
 }
 
