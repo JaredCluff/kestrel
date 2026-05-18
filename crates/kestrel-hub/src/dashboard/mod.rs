@@ -1,9 +1,14 @@
 // crates/kestrel-hub/src/dashboard/mod.rs
 use std::sync::Arc;
 
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    extract::Path,
+    http::{StatusCode, header},
+    response::IntoResponse,
+    routing::get,
+};
 use tokio::task::JoinHandle;
-use tower_http::services::ServeDir;
 
 use crate::router::NodeRegistry;
 
@@ -49,7 +54,8 @@ impl axum::extract::FromRef<AppState> for Arc<NodeRegistry> {
 }
 
 /// Build the dashboard's axum Router. Serves `/`, `/sse`, `/api/nodes`,
-/// `/api/events`, and `/assets/*`.
+/// `/api/events`, and `/assets/*` (assets compiled into the binary so the hub
+/// runs from any directory after `cargo install`).
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
@@ -57,8 +63,24 @@ pub fn router(state: AppState) -> Router {
         .route("/api/nodes", get(api::nodes_json).post(api::post_node))
         .route("/api/nodes/:node_id", axum::routing::delete(api::delete_node))
         .route("/api/events", get(api::events_handler))
-        .nest_service("/assets", ServeDir::new("crates/kestrel-hub/assets"))
+        .route("/assets/:name", get(asset_handler))
         .with_state(state)
+}
+
+// Assets compiled into the binary. Edit the files under crates/kestrel-hub/assets/
+// and a fresh cargo build picks them up.
+const ASSET_DASHBOARD_CSS: &[u8] = include_bytes!("../../assets/dashboard.css");
+const ASSET_HTMX_MIN_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
+const ASSET_HTMX_SSE_JS: &[u8] = include_bytes!("../../assets/htmx-sse.js");
+
+async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
+    let (bytes, mime): (&'static [u8], &'static str) = match name.as_str() {
+        "dashboard.css" => (ASSET_DASHBOARD_CSS, "text/css; charset=utf-8"),
+        "htmx.min.js" => (ASSET_HTMX_MIN_JS, "application/javascript; charset=utf-8"),
+        "htmx-sse.js" => (ASSET_HTMX_SSE_JS, "application/javascript; charset=utf-8"),
+        _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    ([(header::CONTENT_TYPE, mime)], bytes).into_response()
 }
 
 async fn index(axum::extract::State(state): axum::extract::State<AppState>) -> maud::Markup {
