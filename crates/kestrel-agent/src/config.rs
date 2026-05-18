@@ -32,6 +32,26 @@ impl AgentConfig {
     }
 }
 
+/// Write a starter agent kestrel.toml at `path`. Refuses to overwrite.
+pub fn scaffold_agent_config(path: &str, node_id: &str, listen: &str) -> anyhow::Result<()> {
+    if std::path::Path::new(path).exists() {
+        anyhow::bail!("{} already exists", path);
+    }
+    let contents = format!(
+        r#"# Kestrel agent configuration. The PSK lives in your system credential store,
+# put there by `kestrel-agent enroll`.
+
+[agent]
+node_id = "{node_id}"
+listen  = "{listen}"
+"#,
+        node_id = node_id,
+        listen = listen,
+    );
+    std::fs::write(path, contents)
+        .map_err(|e| anyhow::anyhow!("write {}: {}", path, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +68,27 @@ psk     = "deadbeefdeadbeefdeadbeefdeadbeef"
         assert_eq!(cfg.node_id, "test-node");
         assert_eq!(cfg.listen.port(), 7272);
         assert_eq!(cfg.psk, hex::decode("deadbeefdeadbeefdeadbeefdeadbeef").unwrap());
+    }
+
+    #[test]
+    fn scaffold_agent_config_writes_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kestrel.toml");
+        let path_str = path.to_str().unwrap();
+        super::scaffold_agent_config(path_str, "macstudio", "0.0.0.0:7272").unwrap();
+        let contents = std::fs::read_to_string(path_str).unwrap();
+        assert!(contents.contains("node_id"));
+        assert!(contents.contains("macstudio"));
+        assert!(contents.contains("0.0.0.0:7272"));
+    }
+
+    #[test]
+    fn scaffold_agent_config_refuses_to_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kestrel.toml");
+        let path_str = path.to_str().unwrap();
+        std::fs::write(path_str, "existing").unwrap();
+        let err = super::scaffold_agent_config(path_str, "x", "0.0.0.0:7272").unwrap_err();
+        assert!(err.to_string().contains("already exists"));
     }
 }

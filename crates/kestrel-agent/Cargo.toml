@@ -26,6 +26,7 @@ xcap   = { workspace = true }
 image  = { workspace = true }
 arboard      = { workspace = true }
 portable-pty = { workspace = true }
+hostname     = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility     = { workspace = true }
@@ -34,3 +35,4 @@ objc              = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }
