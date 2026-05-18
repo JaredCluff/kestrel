@@ -52,6 +52,7 @@ In another terminal (or another host):
 | `layout-set <id> <col> <row>` | Set/update KVM grid position |
 | `layout-unset <id>` | Remove a KVM grid entry |
 | `tui [--hub URL]` | Interactive TUI against a running hub |
+| `unenroll [--yes] [--keep-config]` | Clear PSK + control token from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |
 
 ### Agent
 
@@ -60,3 +61,4 @@ In another terminal (or another host):
 | `enroll --hub <ip> --key <hex>` | Store PSK + scaffold agent `kestrel.toml` |
 | `start` | Run the agent's WSS server |
 | `status` | Print loaded config + verify keyring PSK |
+| `unenroll [--yes] [--keep-config]` | Clear PSK from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |

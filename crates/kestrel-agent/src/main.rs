@@ -35,6 +35,18 @@ enum Command {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
+    /// Clear the PSK from the keyring and (optionally) delete kestrel.toml.
+    /// Destructive — requires `--yes` to actually take effect.
+    Unenroll {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        /// Skip the config file deletion; only clear the keyring PSK.
+        #[arg(long)]
+        keep_config: bool,
+        /// Required to actually perform the unenroll.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +84,37 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|e| e.get_password())
                 .is_ok();
             println!("psk     : {}", if psk_present { "(present in keyring)" } else { "(MISSING)" });
+        }
+        Command::Unenroll { config, keep_config, yes } => {
+            let will_delete_config = !keep_config && std::path::Path::new(&config).exists();
+            if !yes {
+                println!("`kestrel-agent unenroll` would:");
+                println!("  - clear keyring entry (kestrel, psk)");
+                if will_delete_config {
+                    println!("  - delete {}", config);
+                } else if keep_config {
+                    println!("  - keep {} (--keep-config)", config);
+                } else {
+                    println!("  - {} does not exist, skipping", config);
+                }
+                println!();
+                println!("Re-run with --yes to perform these actions.");
+                return Ok(());
+            }
+            // Clear PSK best-effort.
+            match keyring::Entry::new("kestrel", "psk").and_then(|e| e.delete_password()) {
+                Ok(()) => println!("psk              cleared"),
+                Err(keyring::Error::NoEntry) => println!("psk              (not found)"),
+                Err(e) => println!("psk              FAILED: {}", e),
+            }
+            if will_delete_config {
+                match std::fs::remove_file(&config) {
+                    Ok(()) => println!("{:<16} deleted", config),
+                    Err(e) => println!("{:<16} FAILED: {}", config, e),
+                }
+            } else if keep_config {
+                println!("{:<16} kept (--keep-config)", config);
+            }
         }
     }
     Ok(())
