@@ -78,6 +78,12 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         timeout: u64,
     },
+    /// Open the live TUI dashboard against a running hub.
+    Tui {
+        /// Base URL of the running hub's dashboard HTTP server.
+        #[arg(long, default_value = "http://127.0.0.1:7273")]
+        hub: String,
+    },
 }
 
 #[tokio::main]
@@ -214,6 +220,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        Command::Tui { hub } => {
+            kestrel_hub::tui::run(kestrel_hub::tui::TuiArgs { hub_url: hub }).await?;
         }
     }
     Ok(())
