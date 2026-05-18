@@ -125,6 +125,79 @@ pub async fn events_handler(
     events_stream(registry)
 }
 
+use axum::extract::Path;
+use axum::http::StatusCode;
+
+use crate::config::{add_node, load_doc, remove_node, save_doc};
+use crate::dashboard::AppState;
+use crate::supervisor;
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct AddNodeBody {
+    pub node_id: String,
+    pub address: String,
+}
+
+/// POST /api/nodes — body: { node_id, address }
+/// Atomically (under config_write_lock): mutates config file, spawns supervisor.
+pub async fn post_node(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(body): axum::Json<AddNodeBody>,
+) -> Result<(StatusCode, axum::Json<NodeStatusDto>), (StatusCode, String)> {
+    let address: std::net::SocketAddr = body.address.parse()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid address: {}", e)))?;
+
+    let _lock = state.config_write_lock.lock().await;
+
+    let mut doc = load_doc(&state.config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    add_node(&mut doc, &body.node_id, address)
+        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    save_doc(&state.config_path, &doc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let handle = supervisor::spawn(
+        crate::config::NodeConfig { node_id: body.node_id.clone(), address },
+        state.registry.clone(),
+        state.psk.clone(),
+    );
+    state.supervisors.write().await.insert(body.node_id.clone(), handle);
+
+    let snap_status = NodeStatusDto {
+        node_id: body.node_id.clone(),
+        state: NodeStateDto::Reconnecting,
+        os_name: None,
+        latency_ms: None,
+        last_seen_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+        next_retry_in_ms: None,
+    };
+    Ok((StatusCode::CREATED, axum::Json(snap_status)))
+}
+
+/// DELETE /api/nodes/:node_id
+/// Atomically (under config_write_lock): mutates config file, aborts supervisor, forgets node.
+pub async fn delete_node(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let _lock = state.config_write_lock.lock().await;
+
+    let mut doc = load_doc(&state.config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    remove_node(&mut doc, &node_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    save_doc(&state.config_path, &doc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(handle) = state.supervisors.write().await.remove(&node_id) {
+        handle.abort();
+    }
+    state.registry.forget_node(&node_id).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

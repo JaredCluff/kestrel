@@ -113,6 +113,19 @@ impl NodeRegistry {
         });
     }
 
+    /// Remove a node from both `nodes` and `status` maps and broadcast a
+    /// terminal `Disconnected` event. Idempotent — repeated calls for the same
+    /// node_id are safe and each still emits the event.
+    pub async fn forget_node(&self, node_id: &str) {
+        self.nodes.write().await.remove(node_id);
+        self.status.write().await.remove(node_id);
+        let _ = self.event_tx.send(NodeEvent::Disconnected {
+            node_id: node_id.to_string(),
+            attempt: 0,
+            next_retry_in: Duration::from_secs(0),
+        });
+    }
+
     // ── Phase 2 ───────────────────────────────────────────────────────────────
 
     pub async fn screenshot(&self, node_id: &str, display: u8, region: Option<Rect>) -> anyhow::Result<Vec<u8>> {
@@ -251,5 +264,33 @@ mod tests {
         let snap = r.status_snapshot().await;
         let ids: Vec<&str> = snap.iter().map(|s| s.node_id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn forget_node_removes_from_status_and_emits_disconnect() {
+        let r = NodeRegistry::new();
+        let mut rx = r.subscribe();
+        r.mark_reconnecting("a", 1).await;
+        let _ = rx.recv().await; // consume Reconnecting
+
+        r.forget_node("a").await;
+
+        // Status row gone.
+        let snap = r.status_snapshot().await;
+        assert!(snap.iter().all(|s| s.node_id != "a"));
+
+        // Disconnected event broadcast.
+        let evt = rx.recv().await.unwrap();
+        match evt {
+            NodeEvent::Disconnected { node_id, .. } => assert_eq!(node_id, "a"),
+            other => panic!("expected Disconnected, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn forget_node_is_idempotent() {
+        let r = NodeRegistry::new();
+        r.forget_node("ghost").await; // no panic; just emits an event with attempt=0
+        r.forget_node("ghost").await; // still no panic
     }
 }

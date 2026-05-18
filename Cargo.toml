@@ -35,6 +35,7 @@ accessibility     = "0.2"
 accessibility-sys = "0.2"
 objc              = "0.2"
 axum         = { version = "0.7", features = ["macros"] }
+tower        = "0.5"
 tower-http   = { version = "0.5", features = ["fs"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 maud         = { version = "0.26", features = ["axum"] }
