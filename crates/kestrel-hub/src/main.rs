@@ -24,6 +24,10 @@ enum Command {
     Init {
         #[arg(long, default_value = "0.0.0.0")]
         bind: String,
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        #[arg(long, default_value = "0.0.0.0:7273")]
+        dashboard: String,
     },
     Connect {
         #[arg(long, default_value = "kestrel.toml")]
@@ -48,12 +52,21 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { bind } => {
+        Command::Init { bind, config, dashboard } => {
             let psk = enrollment::generate_psk();
             enrollment::store_psk(&psk)?;
+            match enrollment::scaffold_hub_config(&config, &dashboard) {
+                Ok(()) => println!("Wrote starter config: {}", config),
+                Err(e) => {
+                    // Already-exists is non-fatal — preserve the user's config.
+                    tracing::warn!("config not scaffolded: {}", e);
+                }
+            }
             println!("Key generated and stored in system credential store.");
             println!("Run this on each node machine:");
             println!("  {}", enrollment::enrollment_command(&bind, &psk));
+            println!();
+            println!("Then on this hub: kestrel-hub add-node <id> <addr> && kestrel-hub start");
         }
         Command::Connect { config } => {
             let cfg = HubConfig::from_file(&config)?;

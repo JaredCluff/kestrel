@@ -39,3 +39,4 @@ tower-http   = { version = "0.5", features = ["fs"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 maud         = { version = "0.26", features = ["axum"] }
 futures      = "0.3"
+tempfile = "3"
