@@ -54,20 +54,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/sse", get(sse_handler))
-        .route("/api/nodes", get(api::nodes_json).post(post_node_stub))
-        .route("/api/nodes/:node_id", axum::routing::delete(delete_node_stub))
+        .route("/api/nodes", get(api::nodes_json).post(api::post_node))
+        .route("/api/nodes/:node_id", axum::routing::delete(api::delete_node))
         .route("/api/events", get(api::events_handler))
         .nest_service("/assets", ServeDir::new("crates/kestrel-hub/assets"))
         .with_state(state)
-}
-
-// Temporary stubs — Task 3 replaces these with real handlers in api.rs.
-async fn post_node_stub() -> axum::http::StatusCode {
-    axum::http::StatusCode::NOT_IMPLEMENTED
-}
-
-async fn delete_node_stub() -> axum::http::StatusCode {
-    axum::http::StatusCode::NOT_IMPLEMENTED
 }
 
 async fn index(axum::extract::State(state): axum::extract::State<AppState>) -> maud::Markup {
