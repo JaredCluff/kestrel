@@ -103,6 +103,19 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:7273")]
         hub: String,
     },
+    /// Clear the PSK + control token from the keyring and (optionally) delete kestrel.toml.
+    /// Destructive — requires `--yes` to actually take effect.
+    Unenroll {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        /// Skip the config file deletion; only clear keyring entries.
+        #[arg(long)]
+        keep_config: bool,
+        /// Required to actually perform the unenroll. Without it, prints the
+        /// planned actions and exits without changing anything.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -290,6 +303,39 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Tui { hub } => {
             kestrel_hub::tui::run(kestrel_hub::tui::TuiArgs { hub_url: hub }).await?;
+        }
+        Command::Unenroll { config, keep_config, yes } => {
+            let will_delete_config = !keep_config && std::path::Path::new(&config).exists();
+            if !yes {
+                println!("`kestrel-hub unenroll` would:");
+                println!("  - clear keyring entry (kestrel, psk)");
+                println!("  - clear keyring entry (kestrel, control_token)");
+                if will_delete_config {
+                    println!("  - delete {}", config);
+                } else if keep_config {
+                    println!("  - keep {} (--keep-config)", config);
+                } else {
+                    println!("  - {} does not exist, skipping", config);
+                }
+                println!();
+                println!("Re-run with --yes to perform these actions.");
+                return Ok(());
+            }
+            for step in enrollment::clear_hub_keyring() {
+                match step {
+                    enrollment::UnenrollStep::Cleared(w) => println!("{:<16} cleared", w),
+                    enrollment::UnenrollStep::NotFound(w) => println!("{:<16} (not found)", w),
+                    enrollment::UnenrollStep::Failed(w, e) => println!("{:<16} FAILED: {}", w, e),
+                }
+            }
+            if will_delete_config {
+                match std::fs::remove_file(&config) {
+                    Ok(()) => println!("{:<16} deleted", config),
+                    Err(e) => println!("{:<16} FAILED: {}", config, e),
+                }
+            } else if keep_config {
+                println!("{:<16} kept (--keep-config)", config);
+            }
         }
     }
     Ok(())

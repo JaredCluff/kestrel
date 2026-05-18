@@ -45,6 +45,50 @@ pub fn load_control_token() -> anyhow::Result<String> {
     Ok(entry.get_password()?)
 }
 
+/// Result of a single unenroll step. Errors are non-fatal — unenroll proceeds
+/// best-effort across all keyring entries and reports per-step.
+#[derive(Debug)]
+pub enum UnenrollStep {
+    Cleared(&'static str),
+    NotFound(&'static str),
+    Failed(&'static str, String),
+}
+
+impl UnenrollStep {
+    pub fn label(&self) -> &'static str {
+        match self {
+            UnenrollStep::Cleared(_) => "cleared",
+            UnenrollStep::NotFound(_) => "not found",
+            UnenrollStep::Failed(_, _) => "failed",
+        }
+    }
+    pub fn what(&self) -> &'static str {
+        match self {
+            UnenrollStep::Cleared(w) | UnenrollStep::NotFound(w) | UnenrollStep::Failed(w, _) => w,
+        }
+    }
+}
+
+fn clear_keyring_entry(service: &str, account: &'static str) -> UnenrollStep {
+    match keyring::Entry::new(service, account) {
+        Ok(entry) => match entry.delete_password() {
+            Ok(()) => UnenrollStep::Cleared(account),
+            Err(keyring::Error::NoEntry) => UnenrollStep::NotFound(account),
+            Err(e) => UnenrollStep::Failed(account, e.to_string()),
+        },
+        Err(e) => UnenrollStep::Failed(account, e.to_string()),
+    }
+}
+
+/// Clear PSK and control token from the system credential store. Returns one
+/// `UnenrollStep` per keyring entry so the caller can report per-step status.
+pub fn clear_hub_keyring() -> Vec<UnenrollStep> {
+    vec![
+        clear_keyring_entry("kestrel", "psk"),
+        clear_keyring_entry("kestrel", "control_token"),
+    ]
+}
+
 /// Write a starter hub kestrel.toml at `path`. Refuses to overwrite if a file
 /// already exists at that path.
 pub fn scaffold_hub_config(path: &str, dashboard_addr: &str) -> anyhow::Result<()> {
