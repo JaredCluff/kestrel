@@ -39,3 +39,9 @@ tower-http   = { version = "0.5", features = ["fs"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 maud         = { version = "0.26", features = ["axum"] }
 futures      = "0.3"
+tempfile = "3"
+hostname = "0.4"
+ratatui            = "0.29"
+crossterm          = "0.28"
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+eventsource-client = "0.13"

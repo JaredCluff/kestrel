@@ -6,6 +6,7 @@ use tower_http::services::ServeDir;
 
 use crate::router::NodeRegistry;
 
+pub mod api;
 pub mod sse;
 pub mod templates;
 
@@ -14,13 +15,22 @@ struct AppState {
     registry: Arc<NodeRegistry>,
 }
 
-/// Build the dashboard's axum Router. Serves `/`, `/sse`, and `/assets/*`.
+impl axum::extract::FromRef<AppState> for Arc<NodeRegistry> {
+    fn from_ref(state: &AppState) -> Self {
+        state.registry.clone()
+    }
+}
+
+/// Build the dashboard's axum Router. Serves `/`, `/sse`, `/api/nodes`,
+/// `/api/events`, and `/assets/*`.
 pub fn router(registry: Arc<NodeRegistry>) -> Router {
     let state = AppState { registry };
 
     Router::new()
         .route("/", get(index))
         .route("/sse", get(sse_handler))
+        .route("/api/nodes", get(api::nodes_json))
+        .route("/api/events", get(api::events_handler))
         .nest_service("/assets", ServeDir::new("crates/kestrel-hub/assets"))
         .with_state(state)
 }

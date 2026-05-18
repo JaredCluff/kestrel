@@ -24,6 +24,10 @@ enum Command {
     Init {
         #[arg(long, default_value = "0.0.0.0")]
         bind: String,
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        #[arg(long, default_value = "0.0.0.0:7273")]
+        dashboard: String,
     },
     Connect {
         #[arg(long, default_value = "kestrel.toml")]
@@ -41,6 +45,45 @@ enum Command {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
+    /// Print configured nodes from kestrel.toml.
+    ListNodes {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+    },
+    /// Remove a node from kestrel.toml.
+    RemoveNode {
+        node_id: String,
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+    },
+    /// Set or update a KVM layout entry for a node.
+    LayoutSet {
+        node_id: String,
+        col: i64,
+        row: i64,
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+    },
+    /// Remove a KVM layout entry.
+    LayoutUnset {
+        node_id: String,
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+    },
+    /// Probe each configured node once and print reachability.
+    Status {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        /// Per-node timeout in seconds.
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+    },
+    /// Open the live TUI dashboard against a running hub.
+    Tui {
+        /// Base URL of the running hub's dashboard HTTP server.
+        #[arg(long, default_value = "http://127.0.0.1:7273")]
+        hub: String,
+    },
 }
 
 #[tokio::main]
@@ -48,12 +91,21 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { bind } => {
+        Command::Init { bind, config, dashboard } => {
             let psk = enrollment::generate_psk();
             enrollment::store_psk(&psk)?;
+            match enrollment::scaffold_hub_config(&config, &dashboard) {
+                Ok(()) => println!("Wrote starter config: {}", config),
+                Err(e) => {
+                    // Already-exists is non-fatal — preserve the user's config.
+                    tracing::warn!("config not scaffolded: {}", e);
+                }
+            }
             println!("Key generated and stored in system credential store.");
             println!("Run this on each node machine:");
             println!("  {}", enrollment::enrollment_command(&bind, &psk));
+            println!();
+            println!("Then on this hub: kestrel-hub add-node <id> <addr> && kestrel-hub start");
         }
         Command::Connect { config } => {
             let cfg = HubConfig::from_file(&config)?;
@@ -110,44 +162,67 @@ async fn main() -> anyhow::Result<()> {
             dashboard_handle.abort();
         }
         Command::AddNode { node_id, address, config } => {
-            // Validate the address parses as SocketAddr before touching the file.
-            let _: std::net::SocketAddr = address.parse()
+            let address: std::net::SocketAddr = address.parse()
                 .map_err(|e| anyhow::anyhow!("invalid address '{}': {}", address, e))?;
-
-            let contents = std::fs::read_to_string(&config)
-                .map_err(|e| anyhow::anyhow!("read {}: {}", config, e))?;
-            let mut doc: toml::Value = toml::from_str(&contents)
-                .map_err(|e| anyhow::anyhow!("parse {}: {}", config, e))?;
-
-            // Navigate to hub.nodes (an array of inline tables in [[hub.nodes]] form).
-            let hub = doc.get_mut("hub")
-                .and_then(|v| v.as_table_mut())
-                .ok_or_else(|| anyhow::anyhow!("config has no [hub] section"))?;
-
-            let nodes = hub.entry("nodes")
-                .or_insert_with(|| toml::Value::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or_else(|| anyhow::anyhow!("hub.nodes is not an array"))?;
-
-            // Refuse duplicates.
-            let duplicate = nodes.iter().any(|n| {
-                n.as_table().and_then(|t| t.get("node_id")).and_then(|v| v.as_str()) == Some(node_id.as_str())
-            });
-            if duplicate {
-                anyhow::bail!("node '{}' already exists in {}", node_id, config);
-            }
-
-            let mut entry = toml::value::Table::new();
-            entry.insert("node_id".into(), toml::Value::String(node_id.clone()));
-            entry.insert("address".into(), toml::Value::String(address.clone()));
-            nodes.push(toml::Value::Table(entry));
-
-            let serialized = toml::to_string_pretty(&doc)
-                .map_err(|e| anyhow::anyhow!("serialize TOML: {}", e))?;
-            std::fs::write(&config, serialized)
-                .map_err(|e| anyhow::anyhow!("write {}: {}", config, e))?;
-
+            let mut doc = kestrel_hub::config::load_doc(&config)?;
+            kestrel_hub::config::add_node(&mut doc, &node_id, address)?;
+            kestrel_hub::config::save_doc(&config, &doc)?;
             println!("added '{}' at {}. restart `kestrel-hub start` to connect.", node_id, address);
+        }
+        Command::ListNodes { config } => {
+            let cfg = HubConfig::from_file(&config)?;
+            if cfg.nodes.is_empty() {
+                println!("(no nodes configured)");
+            } else {
+                for n in &cfg.nodes {
+                    println!("{:<24} {}", n.node_id, n.address);
+                }
+            }
+        }
+        Command::RemoveNode { node_id, config } => {
+            let mut doc = kestrel_hub::config::load_doc(&config)?;
+            kestrel_hub::config::remove_node(&mut doc, &node_id)?;
+            kestrel_hub::config::save_doc(&config, &doc)?;
+            println!("removed '{}'.", node_id);
+        }
+        Command::LayoutSet { node_id, col, row, config } => {
+            let mut doc = kestrel_hub::config::load_doc(&config)?;
+            kestrel_hub::config::set_layout(&mut doc, &node_id, col, row)?;
+            kestrel_hub::config::save_doc(&config, &doc)?;
+            println!("layout: '{}' -> ({}, {}).", node_id, col, row);
+        }
+        Command::LayoutUnset { node_id, config } => {
+            let mut doc = kestrel_hub::config::load_doc(&config)?;
+            kestrel_hub::config::remove_layout(&mut doc, &node_id)?;
+            kestrel_hub::config::save_doc(&config, &doc)?;
+            println!("layout cleared for '{}'.", node_id);
+        }
+        Command::Status { config, timeout } => {
+            let cfg = HubConfig::from_file(&config)?;
+            let psk = enrollment::load_psk()?;
+            if cfg.nodes.is_empty() {
+                println!("(no nodes configured)");
+            } else {
+                for node in &cfg.nodes {
+                    let probe = kestrel_hub::status::probe_node(
+                        node,
+                        &psk,
+                        std::time::Duration::from_secs(timeout),
+                    )
+                    .await;
+                    match probe.result {
+                        kestrel_hub::status::NodeProbeResult::Reachable { rtt } => {
+                            println!("{:<24} {:<24} online   {}ms", probe.node_id, probe.address, rtt.as_millis());
+                        }
+                        kestrel_hub::status::NodeProbeResult::Unreachable { reason } => {
+                            println!("{:<24} {:<24} offline  ({})", probe.node_id, probe.address, reason);
+                        }
+                    }
+                }
+            }
+        }
+        Command::Tui { hub } => {
+            kestrel_hub::tui::run(kestrel_hub::tui::TuiArgs { hub_url: hub }).await?;
         }
     }
     Ok(())

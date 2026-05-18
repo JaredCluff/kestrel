@@ -6,5 +6,7 @@ pub mod events;
 pub mod kvm;
 pub mod mcp;
 pub mod router;
+pub mod status;
 pub mod supervisor;
 pub mod transport;
+pub mod tui;

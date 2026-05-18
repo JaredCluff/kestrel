@@ -30,7 +30,12 @@ tower-http   = { workspace = true }
 tokio-stream = { workspace = true }
 maud         = { workspace = true }
 futures      = { workspace = true }
+ratatui            = { workspace = true }
+crossterm          = { workspace = true }
+reqwest            = { workspace = true }
+eventsource-client = { workspace = true }
 
 [dev-dependencies]
 kestrel-agent = { path = "../kestrel-agent" }
 tokio         = { workspace = true }
+tempfile      = { workspace = true }
