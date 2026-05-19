@@ -7,7 +7,7 @@ use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use kestrel_proto::{
     AccessibilityNode, ClipboardContent, hmac_response, Button, KeyCode, KestrelMessage, Modifiers, MsgKind,
-    OsInfo, Payload, PressRelease, Rect,
+    OsInfo, Payload, PressRelease, Rect, AUTH_EXPORTER_LABEL,
 };
 use rustls::ClientConfig;
 use tokio::net::TcpStream;
@@ -357,13 +357,24 @@ pub async fn connect(
     psk: &[u8],
 ) -> anyhow::Result<(NodeHandle, tokio::task::JoinHandle<()>)> {
     let tls = tls_connect(addr).await?;
+
+    // Extract TLS exporter material BEFORE the WebSocket wraps the stream;
+    // bound into the auth MAC to defeat MITM with self-signed certs. See
+    // kestrel_proto::auth.
+    let mut tls_exporter = [0u8; 32];
+    {
+        let (_io, conn) = tls.get_ref();
+        conn.export_keying_material(&mut tls_exporter, AUTH_EXPORTER_LABEL, None)
+            .map_err(|e| anyhow::anyhow!("TLS export_keying_material failed: {}", e))?;
+    }
+
     let url = format!("wss://{}", addr);
     let (ws, _) = client_async_with_config(url, tls, Some(ws_config()))
         .await
         .context("WebSocket handshake")?;
     let (mut tx, mut rx) = ws.split();
 
-    let (node_id, os_info) = do_handshake(&mut tx, &mut rx, psk).await?;
+    let (node_id, os_info) = do_handshake(&mut tx, &mut rx, psk, &tls_exporter).await?;
 
     let ws = tx.reunite(rx).expect("same stream");
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
@@ -383,6 +394,7 @@ async fn do_handshake<Tx, Rx>(
     tx: &mut Tx,
     rx: &mut Rx,
     psk: &[u8],
+    tls_exporter: &[u8],
 ) -> anyhow::Result<(String, OsInfo)>
 where
     Tx: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
@@ -396,7 +408,7 @@ where
     tx.send(Message::Binary(encode(&KestrelMessage {
         stream_id: 0, kind: MsgKind::Response,
         payload: Payload::AuthResponse {
-            mac: hmac_response(psk, &nonce),
+            mac: hmac_response(psk, &nonce, tls_exporter),
             node_id: "hub".into(),
         },
     })?)).await?;

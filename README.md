@@ -2,6 +2,14 @@
 
 Rust-native fleet control: TLS WebSocket transport, MCP-compatible operator hub, agents on every machine. Built for Claude Code to control multi-machine dev environments.
 
+## Security model
+
+Hub↔agent uses TLS WebSocket with PSK-HMAC mutual authentication, **bound to the TLS session via the TLS-exporter**. The agent generates a one-shot self-signed cert at startup (not pinned); a LAN MITM that terminates TLS on each leg sees a different exporter than the legitimate endpoint, so the proxied MAC won't verify on the far side and the connection dies. The PSK is in your system keyring (`kestrel-hub init` / `kestrel-agent enroll` puts it there).
+
+The hub's dashboard at `:7273` is plain HTTP. Read-only endpoints (HTML dashboard, `/api/nodes` GET, `/api/events` SSE) are open. Mutation endpoints (`POST`/`DELETE /api/nodes`) require a Bearer control token from the keyring. LAN-only assumed for the dashboard host.
+
+**Out of scope (today):** mutual auth beyond the PSK, per-node PSKs, audit logging of MCP tool calls, dashboard TLS.
+
 ## Setup
 
 On the hub host:

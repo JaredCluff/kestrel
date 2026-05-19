@@ -5,6 +5,7 @@ use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use kestrel_proto::{
     verify_response, AccessibilityNode, DisplayInfo, KestrelMessage, MsgKind, OsInfo, Payload,
+    AUTH_EXPORTER_LABEL,
 };
 use rand::RngCore;
 use rustls::ServerConfig;
@@ -74,6 +75,19 @@ async fn handle_conn(
     node_id: String,
 ) -> anyhow::Result<()> {
     let tls = acceptor.accept(stream).await.context("TLS handshake failed")?;
+
+    // Extract TLS exporter material BEFORE wrapping the stream in a WebSocket;
+    // once tokio-tungstenite owns the TlsStream we can no longer reach the
+    // rustls Connection. The exporter binds the auth MAC to this exact TLS
+    // session — a MITM that terminates TLS on each leg sees a different
+    // exporter than the legitimate endpoint, so the proxied MAC won't verify.
+    let mut tls_exporter = [0u8; 32];
+    {
+        let (_io, conn) = tls.get_ref();
+        conn.export_keying_material(&mut tls_exporter, AUTH_EXPORTER_LABEL, None)
+            .map_err(|e| anyhow::anyhow!("TLS export_keying_material failed: {}", e))?;
+    }
+
     let ws = accept_async_with_config(tls, Some(ws_config()))
         .await
         .context("WebSocket handshake failed")?;
@@ -93,9 +107,12 @@ async fn handle_conn(
     let Payload::AuthResponse { mac, node_id: claimed } = km.payload else {
         anyhow::bail!("expected AuthResponse");
     };
-    if !verify_response(&psk, &nonce, &mac) {
+    if !verify_response(&psk, &nonce, &tls_exporter, &mac) {
         let _ = tx.send(Message::Close(None)).await;
-        anyhow::bail!("auth failed: bad MAC from claimed node_id={}", claimed);
+        anyhow::bail!(
+            "auth failed: bad MAC from claimed node_id={} (PSK mismatch or MITM detected)",
+            claimed
+        );
     }
     tracing::info!("hub authenticated (claimed node_id={})", claimed);
 
