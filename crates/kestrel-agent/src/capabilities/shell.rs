@@ -10,6 +10,9 @@ use tokio::sync::mpsc::UnboundedSender;
 struct PtySession {
     master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn std::io::Write + Send>,
+    /// Child process handle so we can kill it on close. portable-pty's `Child`
+    /// trait requires `&mut`, so we wrap it in a Mutex for shared access.
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
 pub struct ShellManager {
@@ -39,11 +42,12 @@ impl ShellManager {
             })
         });
         let cmd = CommandBuilder::new(&shell_path);
-        pair.slave.spawn_command(cmd).context("spawn_command failed")?;
+        let child = pair.slave.spawn_command(cmd).context("spawn_command failed")?;
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().context("try_clone_reader")?;
         let writer = pair.master.take_writer().context("take_writer")?;
+        let child = Arc::new(Mutex::new(child));
 
         let pty_id = {
             let mut next = self.next_id.lock().unwrap();
@@ -52,7 +56,10 @@ impl ShellManager {
             id
         };
 
-        self.sessions.lock().unwrap().insert(pty_id, PtySession { master: pair.master, writer });
+        self.sessions.lock().unwrap().insert(
+            pty_id,
+            PtySession { master: pair.master, writer, child: child.clone() },
+        );
 
         let event_tx = self.event_tx.clone();
         let sessions = self.sessions.clone();
@@ -108,7 +115,29 @@ impl ShellManager {
     }
 
     pub fn close(&self, pty_id: u32) {
-        self.sessions.lock().unwrap().remove(&pty_id);
+        // Kill the child first; dropping the master FD doesn't unblock the reader's
+        // blocking read() on Linux until the child exits. Best-effort — if the
+        // child is already gone, kill() returns an error we ignore.
+        if let Some(session) = self.sessions.lock().unwrap().remove(&pty_id) {
+            if let Ok(mut child) = session.child.lock() {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    /// Close every active PTY. Called on agent shutdown / WS disconnect so that
+    /// orphaned shells don't linger between sessions.
+    pub fn close_all(&self) {
+        let ids: Vec<u32> = self.sessions.lock().unwrap().keys().copied().collect();
+        for id in ids {
+            self.close(id);
+        }
+    }
+}
+
+impl Drop for ShellManager {
+    fn drop(&mut self) {
+        self.close_all();
     }
 }
 

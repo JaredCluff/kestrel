@@ -13,7 +13,31 @@ use rustls::ClientConfig;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsConnector;
-use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    client_async_with_config,
+    tungstenite::Message,
+    tungstenite::protocol::WebSocketConfig,
+    WebSocketStream,
+};
+
+/// Per-PTY buffer cap. A misbehaving (or malicious) agent that pipes
+/// /dev/urandom into a PTY would otherwise grow hub RAM without bound;
+/// callers normally drain via shell_read but the buffer fills between drains.
+/// 1 MiB lets a reasonable terminal session backlog while keeping worst-case
+/// memory at `1 MiB × open PTYs` per actor.
+const SHELL_BUFFER_CAP: usize = 1024 * 1024;
+
+/// Marker appended when the per-PTY buffer truncates so the operator notices.
+const SHELL_TRUNCATED_MARKER: &[u8] = b"\n[kestrel: shell output truncated to cap]\n";
+
+/// Matches the agent's WebSocket message-size cap. Both sides enforce so a
+/// malicious peer can't force allocation of a giant frame on either end.
+fn ws_config() -> WebSocketConfig {
+    let mut cfg = WebSocketConfig::default();
+    cfg.max_message_size = Some(8 * 1024 * 1024);
+    cfg.max_frame_size = Some(8 * 1024 * 1024);
+    cfg
+}
 
 // ── TLS ──────────────────────────────────────────────────────────────────────
 
@@ -131,7 +155,8 @@ async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
                         // Handle streaming shell events (stream_id=0, no pending waiter)
                         match &msg.payload {
                             Payload::ShellOutput { pty_id, data } => {
-                                shell_buffers.entry(*pty_id).or_default().extend(data);
+                                let buf = shell_buffers.entry(*pty_id).or_default();
+                                append_with_cap(buf, data);
                             }
                             Payload::ShellClose { pty_id } => {
                                 if let Some(waiter) = shell_close_waiters.remove(pty_id) {
@@ -147,6 +172,27 @@ async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
                     }
                     Err(e) => tracing::warn!("hub transport decode error: {}", e),
                 }
+            }
+        }
+    }
+    // Drain any commands still queued. Without this, a `ReadShellBuffer` or
+    // `Request` racing the disconnect would see its oneshot dropped (caller
+    // gets "actor dropped reply") instead of the buffered data / a clear
+    // "connection closed" error. Closing the channel and re-receiving lets us
+    // hand back what we still have in `shell_buffers`.
+    cmd_rx.close();
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            ActorCmd::Fire(_) => {}
+            ActorCmd::Request { reply, .. } => {
+                let _ = reply.send(Err(anyhow::anyhow!("connection closed")));
+            }
+            ActorCmd::ReadShellBuffer { pty_id, reply } => {
+                let data = shell_buffers.remove(&pty_id).unwrap_or_default();
+                let _ = reply.send(data);
+            }
+            ActorCmd::WaitShellClose { reply, .. } => {
+                let _ = reply.send(());
             }
         }
     }
@@ -312,7 +358,9 @@ pub async fn connect(
 ) -> anyhow::Result<(NodeHandle, tokio::task::JoinHandle<()>)> {
     let tls = tls_connect(addr).await?;
     let url = format!("wss://{}", addr);
-    let (ws, _) = client_async(url, tls).await.context("WebSocket handshake")?;
+    let (ws, _) = client_async_with_config(url, tls, Some(ws_config()))
+        .await
+        .context("WebSocket handshake")?;
     let (mut tx, mut rx) = ws.split();
 
     let (node_id, os_info) = do_handshake(&mut tx, &mut rx, psk).await?;
@@ -368,4 +416,65 @@ fn encode(msg: &KestrelMessage) -> anyhow::Result<Vec<u8>> {
 fn decode(bytes: Vec<u8>) -> anyhow::Result<KestrelMessage> {
     let (msg, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())?;
     Ok(msg)
+}
+
+/// Append `data` to a per-PTY shell buffer, dropping the oldest bytes if total
+/// length would exceed `SHELL_BUFFER_CAP`. A one-shot truncation marker is
+/// appended on the first overflow so the operator notices output was lost.
+fn append_with_cap(buf: &mut Vec<u8>, data: &[u8]) {
+    let already_truncated = buf.ends_with(SHELL_TRUNCATED_MARKER);
+    buf.extend_from_slice(data);
+    if buf.len() > SHELL_BUFFER_CAP {
+        let excess = buf.len() - SHELL_BUFFER_CAP;
+        buf.drain(..excess);
+        if !already_truncated {
+            buf.extend_from_slice(SHELL_TRUNCATED_MARKER);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_with_cap_passes_through_small_writes() {
+        let mut buf = Vec::new();
+        append_with_cap(&mut buf, b"hello");
+        append_with_cap(&mut buf, b" world");
+        assert_eq!(buf, b"hello world");
+    }
+
+    #[test]
+    fn append_with_cap_truncates_when_exceeded_and_marks() {
+        let mut buf = Vec::new();
+        // First write fills under the cap.
+        append_with_cap(&mut buf, &vec![b'A'; SHELL_BUFFER_CAP - 10]);
+        assert_eq!(buf.len(), SHELL_BUFFER_CAP - 10);
+        assert!(!buf.ends_with(SHELL_TRUNCATED_MARKER));
+        // Second write pushes over; buffer drops oldest bytes and appends marker.
+        append_with_cap(&mut buf, &vec![b'B'; 1000]);
+        assert!(buf.len() <= SHELL_BUFFER_CAP + SHELL_TRUNCATED_MARKER.len());
+        assert!(buf.ends_with(SHELL_TRUNCATED_MARKER));
+    }
+
+    #[test]
+    fn append_with_cap_stays_bounded_across_many_overflows() {
+        // Buffer must never grow unbounded, even after many overflowing writes.
+        let mut buf = Vec::new();
+        for _ in 0..20 {
+            append_with_cap(&mut buf, &vec![b'Z'; 200_000]);
+        }
+        assert!(
+            buf.len() <= SHELL_BUFFER_CAP + 2 * SHELL_TRUNCATED_MARKER.len(),
+            "buffer grew unbounded: {} bytes",
+            buf.len()
+        );
+        // At least one truncation marker should be present so the operator knows.
+        assert!(
+            buf.windows(SHELL_TRUNCATED_MARKER.len())
+                .any(|w| w == SHELL_TRUNCATED_MARKER),
+            "expected at least one truncation marker"
+        );
+    }
 }

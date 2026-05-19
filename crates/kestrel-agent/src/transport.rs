@@ -10,10 +10,21 @@ use rand::RngCore;
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{accept_async_with_config, tungstenite::Message, tungstenite::protocol::WebSocketConfig};
 
 use crate::capabilities::{clipboard, input, screen, shell::ShellManager};
 use crate::config::AgentConfig;
+
+/// Cap WebSocket message size to bound memory per frame. Screenshots are the
+/// largest legitimate payload (PNGs of 4K displays); 8 MiB gives generous
+/// headroom while still preventing a malicious peer from forcing the agent
+/// to allocate hundreds of MB on a single bincode-decoded frame.
+fn ws_config() -> WebSocketConfig {
+    let mut cfg = WebSocketConfig::default();
+    cfg.max_message_size = Some(8 * 1024 * 1024);
+    cfg.max_frame_size = Some(8 * 1024 * 1024);
+    cfg
+}
 
 fn make_tls_config() -> Arc<ServerConfig> {
     let cert = rcgen::generate_simple_self_signed(vec!["kestrel-agent".into()]).unwrap();
@@ -63,7 +74,9 @@ async fn handle_conn(
     node_id: String,
 ) -> anyhow::Result<()> {
     let tls = acceptor.accept(stream).await.context("TLS handshake failed")?;
-    let ws = accept_async(tls).await.context("WebSocket handshake failed")?;
+    let ws = accept_async_with_config(tls, Some(ws_config()))
+        .await
+        .context("WebSocket handshake failed")?;
     let (mut tx, mut rx) = ws.split();
 
     // Challenge
