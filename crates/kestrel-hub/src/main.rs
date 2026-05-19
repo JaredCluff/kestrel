@@ -34,11 +34,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Init {
-        #[arg(long, default_value = "0.0.0.0")]
+        /// IP the agent enrollment command will point at. Default `127.0.0.1`
+        /// is for loopback / single-machine setups; pass `--bind 0.0.0.0` (or
+        /// the LAN IP of this hub host) to let other machines enroll.
+        #[arg(long, default_value = "127.0.0.1")]
         bind: String,
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
-        #[arg(long, default_value = "0.0.0.0:7273")]
+        /// Dashboard listen address. Default `127.0.0.1:7273` is loopback-only;
+        /// pass `--dashboard 0.0.0.0:7273` to expose to the LAN (read-only
+        /// endpoints have no auth; mutation endpoints require the control
+        /// token).
+        #[arg(long, default_value = "127.0.0.1:7273")]
         dashboard: String,
     },
     Connect {

@@ -15,9 +15,14 @@ The hub's dashboard at `:7273` is plain HTTP. Read-only endpoints (HTML dashboar
 On the hub host:
 
     cargo install --path crates/kestrel-hub
-    kestrel-hub init --bind 0.0.0.0           # generates PSK, scaffolds kestrel.toml
 
-This prints an enrollment command. Copy it to each node and run there:
+    # Loopback (single-machine) — defaults to 127.0.0.1
+    kestrel-hub init
+
+    # OR LAN/fleet — explicit bind + dashboard so other machines can reach you
+    kestrel-hub init --bind 192.168.1.10 --dashboard 192.168.1.10:7273
+
+`init` generates PSK + control token (both stored in the keyring) and scaffolds `kestrel.toml`. It also prints an enrollment command for nodes. Copy that to each node and run:
 
     cargo install --path crates/kestrel-agent
     kestrel-agent enroll --hub <hub-ip> --key <hex-from-hub>
