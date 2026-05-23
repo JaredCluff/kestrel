@@ -9,8 +9,17 @@ use kestrel_hub::events::NodeEvent;
 use kestrel_hub::router::NodeRegistry;
 use kestrel_hub::supervisor;
 
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
+/// Hub-side master secret for tests. The supervisor receives this; each
+/// agent in a test receives only its own HKDF-derived per-node PSK.
+fn test_master_secret() -> Vec<u8> {
+    b"kestrel-test-master-32bytes-pad!".to_vec()
+}
+
+/// Per-node PSK derivation matching what the production supervisor does on
+/// connect. Tests give this to the agent and the master_secret to the
+/// supervisor — same as a real deployment.
+fn test_psk_for(node_id: &str) -> Vec<u8> {
+    kestrel_proto::derive_per_node_psk(&test_master_secret(), node_id).to_vec()
 }
 
 /// A handle to an agent running on its own dedicated tokio runtime in a separate thread.
@@ -37,7 +46,7 @@ impl AgentHandle {
 fn spawn_agent_on(node_id: &str, addr: SocketAddr) -> (SocketAddr, AgentHandle) {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<SocketAddr>();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let cfg = AgentConfig::new(addr, node_id.into(), test_psk());
+    let cfg = AgentConfig::new(addr, node_id.into(), test_psk_for(node_id));
 
     // We build the runtime INSIDE the dedicated thread so the runtime is owned by
     // that thread. Sending a shutdown signal causes serve to exit; the thread then
@@ -208,15 +217,16 @@ async fn count_disconnects(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn supervisor_uses_configured_node_id_when_agent_hostname_differs() {
-    // Pass-1 fix: a typo in kestrel.toml pointing one node's id at another
-    // node's host would silently register the agent under the WRONG identity
-    // because the PSK is shared across the fleet. Supervisor now compares the
-    // agent's self-reported hostname against the configured `node_id` and
-    // trusts the operator's config.
+    // Pass-1 originally protected against this scenario by overriding the
+    // agent's self-reported hostname with the operator's configured id —
+    // necessary because every agent shared a single fleet PSK, so the typo
+    // would otherwise silently misregister an agent.
     //
-    // This test was added in Pass 2 — the Pass-1 change had no test coverage
-    // because every other integration test happens to use the same id on
-    // both sides.
+    // With per-node PSKs (HKDF-derived from a hub master), this scenario
+    // can no longer silently succeed: the agent's PSK is bound to its own
+    // node_id, the supervisor derives the PSK from the *configured* id, the
+    // two derivations differ, and the HMAC handshake fails. The test now
+    // pins that STRONGER property — mismatched ids never even authenticate.
     let (addr, agent) =
         spawn_agent_on("agent-reports-this", "127.0.0.1:0".parse().unwrap());
 
@@ -228,41 +238,35 @@ async fn supervisor_uses_configured_node_id_when_agent_hostname_differs() {
             address: addr,
         },
         registry.clone(),
-        test_psk(),
+        test_master_secret(),
     );
 
-    // The Connected event MUST carry the operator's configured node_id, not
-    // the agent's self-reported hostname.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut got = false;
+    // Within the timeout, a Connected event MUST NOT arrive — auth fails,
+    // the supervisor only emits Disconnected/Reconnecting.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_connected = false;
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Ok(NodeEvent::Connected { node_id, .. })) => {
-                assert_eq!(
-                    node_id, "operator-config",
-                    "supervisor must use the configured node_id, not the agent-reported hostname"
-                );
-                got = true;
+            Ok(Ok(NodeEvent::Connected { .. })) => {
+                saw_connected = true;
                 break;
             }
-            Ok(Ok(_)) => continue,
+            Ok(Ok(_)) => continue, // Disconnected/Reconnecting are expected
             _ => break,
         }
     }
-    assert!(got, "did not observe a Connected event in time");
+    assert!(
+        !saw_connected,
+        "auth must FAIL when configured node_id != the id the agent's PSK was derived under"
+    );
 
-    // Registry should also key by the configured id (the MCP dispatch + KVM
-    // routing both look up nodes by this string).
+    // The registry must also NOT contain the agent under the agent's
+    // self-reported hostname (the supervisor never registered anything).
     let snap = registry.status_snapshot().await;
     assert!(
-        snap.iter().any(|s| s.node_id == "operator-config"),
-        "registry should contain the configured node_id; got {:?}",
-        snap.iter().map(|s| &s.node_id).collect::<Vec<_>>()
-    );
-    assert!(
         !snap.iter().any(|s| s.node_id == "agent-reports-this"),
-        "registry must NOT contain the agent-reported hostname"
+        "agent-reports-this must not leak into the registry under any name"
     );
 
     // Cleanup.
@@ -276,18 +280,12 @@ async fn supervisor_uses_configured_node_id_when_agent_hostname_differs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn supervisor_uses_agent_node_id_when_configured_matches() {
-    // Companion to `supervisor_uses_configured_node_id_when_agent_hostname_differs`.
-    // When the operator's configured node_id MATCHES what the agent reports,
-    // the supervisor's mismatch-rename branch must NOT fire — the registry
-    // should key by the (identical) id either way, but the warn-level log
-    // should be absent. We can't easily assert "no log" without a tracing
-    // capture harness, but we can assert the registered id is exactly the
-    // configured one — which is the contract that matters.
-    //
-    // Without this companion test, a regression that made the supervisor
-    // ALWAYS overwrite handle.node_id (instead of conditionally on mismatch)
-    // would still pass the original test because the override happens to
-    // produce the right id. Pairing both tests pins the if/else surface.
+    // Happy path: when the operator's configured node_id matches what the
+    // agent's PSK was derived under, the supervisor's HKDF derivation
+    // yields the same key the agent stored, the HMAC handshake verifies,
+    // and we get a Connected event whose node_id is the configured one.
+    // Companion to the mismatched-ids test above which verifies auth
+    // fails when the two diverge.
     let (addr, agent) = spawn_agent_on("matching-id", "127.0.0.1:0".parse().unwrap());
 
     let registry = Arc::new(NodeRegistry::new());
@@ -298,7 +296,7 @@ async fn supervisor_uses_agent_node_id_when_configured_matches() {
             address: addr,
         },
         registry.clone(),
-        test_psk(),
+        test_master_secret(),
     );
 
     wait_for_connected(&mut rx, "matching-id", Duration::from_secs(5))
@@ -337,7 +335,11 @@ async fn supervisor_keeps_retrying_with_wrong_psk() {
             address: addr,
         },
         registry.clone(),
-        test_psk(), // wrong PSK relative to the agent
+        // Supervisor will derive(master, "psk-rotated") for auth; the agent
+        // has a completely unrelated PSK (rotated_psk()), so verification
+        // fails on every retry. This pins the supervisor's behavior when
+        // an agent's PSK has been rotated out of sync with the hub.
+        test_master_secret(),
     );
 
     // First Disconnected arrives almost immediately (auth fails on first
@@ -372,7 +374,7 @@ async fn supervisor_reconnects_after_agent_restart() {
     let _sup = supervisor::spawn(
         NodeConfig { node_id: "recon-node".into(), address: addr_a },
         registry.clone(),
-        test_psk(),
+        test_master_secret(),
     );
 
     // 3. Expect first Connected within 5s.

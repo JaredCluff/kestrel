@@ -1,27 +1,37 @@
+use kestrel_proto::derive_per_node_psk;
 use rand::RngCore;
 
-pub fn generate_psk() -> Vec<u8> {
+/// Generate a 32-byte hub master secret. Per-node PSKs are HKDF-derived
+/// from this on every connect; the master itself never leaves the hub
+/// keyring.
+pub fn generate_master_secret() -> Vec<u8> {
     let mut key = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
     key
 }
 
-pub fn enrollment_command(hub_ip: &str, psk: &[u8]) -> String {
+/// Print-ready agent enrollment line for a specific node. The hub-side
+/// master_secret is HKDF-expanded into a per-node PSK; only that derived
+/// PSK is given to the agent, so a leaked agent key cannot derive any
+/// other node's key or the master.
+pub fn enrollment_command(hub_ip: &str, node_id: &str, master_secret: &[u8]) -> String {
+    let psk = derive_per_node_psk(master_secret, node_id);
     format!(
-        "kestrel-agent enroll --hub {} --key {}",
+        "kestrel-agent enroll --hub {} --node-id {} --key {}",
         hub_ip,
+        node_id,
         hex::encode(psk)
     )
 }
 
-pub fn store_psk(psk: &[u8]) -> anyhow::Result<()> {
-    let entry = keyring::Entry::new("kestrel", "psk")?;
-    entry.set_password(&hex::encode(psk))?;
+pub fn store_master_secret(master_secret: &[u8]) -> anyhow::Result<()> {
+    let entry = keyring::Entry::new("kestrel", "master_secret")?;
+    entry.set_password(&hex::encode(master_secret))?;
     Ok(())
 }
 
-pub fn load_psk() -> anyhow::Result<Vec<u8>> {
-    let entry = keyring::Entry::new("kestrel", "psk")?;
+pub fn load_master_secret() -> anyhow::Result<Vec<u8>> {
+    let entry = keyring::Entry::new("kestrel", "master_secret")?;
     Ok(hex::decode(entry.get_password()?)?)
 }
 
@@ -80,11 +90,16 @@ fn clear_keyring_entry(service: &str, account: &'static str) -> UnenrollStep {
     }
 }
 
-/// Clear PSK and control token from the system credential store. Returns one
+/// Clear hub-side secrets from the system credential store. Returns one
 /// `UnenrollStep` per keyring entry so the caller can report per-step status.
+///
+/// `psk` is included for legacy cleanup: pre-per-node-PSK installs stored a
+/// fleet-wide PSK under that account name. New installs use `master_secret`
+/// only — the legacy entry being NotFound is expected and reported as such.
 pub fn clear_hub_keyring() -> Vec<UnenrollStep> {
     vec![
-        clear_keyring_entry("kestrel", "psk"),
+        clear_keyring_entry("kestrel", "master_secret"),
+        clear_keyring_entry("kestrel", "psk"), // legacy
         clear_keyring_entry("kestrel", "control_token"),
     ]
 }
@@ -118,25 +133,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generate_psk_is_32_bytes() {
-        let key = generate_psk();
+    fn generate_master_secret_is_32_bytes() {
+        let key = generate_master_secret();
         assert_eq!(key.len(), 32);
     }
 
     #[test]
     fn enrollment_command_contains_required_parts() {
-        let key = vec![0u8; 32];
-        let cmd = enrollment_command("192.168.1.10", &key);
+        let master = vec![0u8; 32];
+        let cmd = enrollment_command("192.168.1.10", "alpha", &master);
         assert!(cmd.contains("kestrel-agent enroll"));
         assert!(cmd.contains("192.168.1.10"));
+        assert!(cmd.contains("--node-id alpha"));
         assert!(cmd.contains("--key"));
     }
 
     #[test]
-    fn enrollment_command_hex_encoding() {
-        let key = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
-        let cmd = enrollment_command("10.0.0.1", &key);
-        assert!(cmd.contains("deadbeef"));
+    fn enrollment_command_prints_derived_not_master() {
+        // The per-node PSK printed in the enrollment line MUST be the HKDF
+        // derivation, not the master itself — otherwise leaking the line
+        // leaks the master.
+        let master = vec![0xABu8; 32];
+        let cmd = enrollment_command("10.0.0.1", "alpha", &master);
+        let derived = kestrel_proto::derive_per_node_psk(&master, "alpha");
+        assert!(cmd.contains(&hex::encode(derived)));
+        // And the master hex must NOT appear in the line.
+        assert!(!cmd.contains(&hex::encode(&master)));
+    }
+
+    #[test]
+    fn enrollment_command_per_node_differs() {
+        // Same master, different node_id → different enrollment line.
+        // Pins that we're actually deriving per-node.
+        let master = vec![0xCDu8; 32];
+        let alpha = enrollment_command("h", "alpha", &master);
+        let beta = enrollment_command("h", "beta", &master);
+        assert_ne!(alpha, beta);
     }
 
     #[test]

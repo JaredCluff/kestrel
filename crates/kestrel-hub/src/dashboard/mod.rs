@@ -24,7 +24,10 @@ pub type SupervisorMap = Arc<tokio::sync::RwLock<std::collections::HashMap<Strin
 pub struct AppState {
     pub registry: Arc<NodeRegistry>,
     pub config_path: String,
-    pub psk: Vec<u8>,
+    /// Hub-side master secret. Supervisors derive each node's per-node PSK
+    /// from this + the node_id at connect time via HKDF-SHA256. The master
+    /// itself never goes over the wire and never reaches agents.
+    pub master_secret: Vec<u8>,
     pub supervisors: SupervisorMap,
     /// Serializes config file read-modify-write cycles across concurrent HTTP requests.
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -37,12 +40,12 @@ impl AppState {
     pub fn new(
         registry: Arc<NodeRegistry>,
         config_path: String,
-        psk: Vec<u8>,
+        master_secret: Vec<u8>,
     ) -> Self {
         AppState {
             registry,
             config_path,
-            psk,
+            master_secret,
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             control_token: None,
