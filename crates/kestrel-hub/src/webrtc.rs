@@ -39,6 +39,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
 
+// Phase 13b: pull in webrtc-rs for real PeerConnection establishment.
+// The renamed import (rtc) avoids name-collisions with this module.
+use ::webrtc as rtc;
+
 /// One streaming session between a dashboard browser and an agent.
 /// Created by the dashboard calling POST /api/webrtc/session; the
 /// hub allocates an id, the browser POSTs its SDP offer, the agent
@@ -96,6 +100,43 @@ impl SessionRegistry {
         };
         self.inner.write().await.insert(id.clone(), sess);
         id
+    }
+
+    /// Build a hub-side PeerConnection ready to accept the browser's
+    /// offer. Configured with the default Google STUN server; operators
+    /// running NAT'd setups should swap in their own ICE servers.
+    ///
+    /// CAVEAT: this is the "establish the connection" half of WebRTC.
+    /// The other half — adding a video track sourced from agent
+    /// screen captures encoded as H.264 RTP — is the multi-day chunk
+    /// still pending. Without that track, the browser sees a successful
+    /// PeerConnection with no media. The structural plumbing here is
+    /// what later work hangs the encoder pipeline off of.
+    pub async fn build_peer_connection() -> anyhow::Result<Arc<rtc::peer_connection::RTCPeerConnection>> {
+        use rtc::api::APIBuilder;
+        use rtc::api::interceptor_registry::register_default_interceptors;
+        use rtc::api::media_engine::MediaEngine;
+        use rtc::interceptor::registry::Registry;
+        use rtc::peer_connection::configuration::RTCConfiguration;
+        use rtc::ice_transport::ice_server::RTCIceServer;
+
+        let mut m = MediaEngine::default();
+        m.register_default_codecs()?;
+        let mut registry = Registry::new();
+        registry = register_default_interceptors(registry, &mut m)?;
+        let api = APIBuilder::new()
+            .with_media_engine(m)
+            .with_interceptor_registry(registry)
+            .build();
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let pc = api.new_peer_connection(config).await?;
+        Ok(Arc::new(pc))
     }
 
     pub async fn get(&self, id: &str) -> Option<Session> {
