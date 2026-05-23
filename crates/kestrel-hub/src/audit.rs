@@ -102,6 +102,44 @@ impl AuditLogger {
     /// Append one entry. Best-effort: write errors are logged via
     /// `tracing::warn!` but never propagated — an unwriteable audit
     /// log must not break MCP tool calls.
+    pub async fn log_with_user(
+        &self,
+        user_id: Option<&str>,
+        op: &str,
+        node_id: &str,
+        args_summary: &str,
+        status: CallStatus,
+        duration_ms: u64,
+        error: Option<&str>,
+    ) {
+        let AuditInner::File { file } = &*self.inner else {
+            return;
+        };
+        let ts_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ts_human = format_rfc3339_utc(ts_unix);
+        let user_field = match user_id {
+            Some(u) => format!("\"{}\"", json_escape(u)),
+            None => "null".to_string(),
+        };
+        let line = format!(
+            "{{\"ts_unix\":{},\"ts\":\"{}\",\"user_id\":{},\"op\":\"{}\",\"node_id\":\"{}\",\"args\":\"{}\",\"status\":\"{}\",\"duration_ms\":{},\"error\":{}}}\n",
+            ts_unix, ts_human, user_field,
+            json_escape(op), json_escape(node_id), json_escape(args_summary),
+            status.as_str(), duration_ms,
+            match error {
+                Some(e) => format!("\"{}\"", json_escape(e)),
+                None => "null".to_string(),
+            }
+        );
+        let mut f = file.lock().await;
+        if let Err(e) = f.write_all(line.as_bytes()).await {
+            tracing::warn!("audit log write failed: {}", e);
+        }
+    }
+
     pub async fn log(
         &self,
         op: &str,
