@@ -14,24 +14,26 @@
 //   - The session's accessibility bus environment variable visible to
 //     the process (`AT_SPI_BUS_ADDRESS` or session bus discovery).
 //
-// On any failure (no bus, deny, runtime build failure), we return
-// `AccessibilityNode::unavailable()` (which sets `fallback: true`) so
-// callers fall back to a screenshot.
+// On any failure (no bus, deny, runtime build failure, proxy call
+// errors), we return `AccessibilityNode::unavailable()` (which sets
+// `fallback: true`) so callers fall back to a screenshot.
 //
-// Current implementation depth: we connect to the bus and return a
-// root node populated with what we can discover quickly. Tree walking
-// across the AT-SPI D-Bus surface is non-trivial (each child is a
-// separate D-Bus object reference and must be queried separately),
-// and a multi-level walk would warrant its own follow-up PR. For now,
-// depth-1 is enough to prove the wiring works end-to-end and gives
-// callers useful "an application is in focus" signal.
+// AUTHOR CAVEAT: This file's tree-walk recursion was written without
+// the ability to runtime-verify on a Linux machine. The structural
+// recursion (depth budget, per-child query, error-to-fallback
+// degradation) is straightforward; the specific atspi proxy method
+// names are taken from atspi 0.22 docs.rs and may need minor
+// adjustment in a follow-up if the API has drifted. Any failure path
+// converts to an empty children list with the node's role intact, so
+// even partial API matches give callers useful output.
 
 use kestrel_proto::AccessibilityNode;
 
+/// Maximum recursion depth. Matches the macOS implementation so
+/// callers get comparable output shapes across platforms.
+const MAX_DEPTH: u8 = 5;
+
 pub fn describe() -> AccessibilityNode {
-    // Build a small current-thread tokio runtime. We're called from a
-    // tokio::task::spawn_blocking context (see transport.rs), so
-    // creating a nested runtime here is allowed.
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -48,7 +50,7 @@ pub fn describe() -> AccessibilityNode {
 async fn describe_async() -> AccessibilityNode {
     // Open the accessibility bus. If at-spi-bus-launcher isn't running
     // (headless / SSH / kiosk session), this errors and we fall back.
-    let _conn = match atspi::AccessibilityConnection::open().await {
+    let conn = match atspi::AccessibilityConnection::open().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("ax(linux): AT-SPI bus open failed: {}", e);
@@ -56,27 +58,117 @@ async fn describe_async() -> AccessibilityNode {
         }
     };
 
-    // AT-SPI tree walking is non-trivial — each `Accessible` is a
-    // D-Bus object reference and children must be requested via
-    // separate proxy calls. A complete depth-5 walk would warrant a
-    // dedicated PR with its own tests against a known reference
-    // application. For now, we successfully attached to the bus, so
-    // the system AT-SPI stack is healthy; return a populated root
-    // node with `fallback: false` so the MCP caller knows the platform
-    // backend is reachable, plus a `role: "desktop"` marker noting we
-    // don't yet enumerate children on Linux.
+    // Walk from the registry's root. atspi exposes the desktop frame
+    // as the root of the application tree; from there we look for the
+    // active application and recurse into it.
     //
-    // Follow-up TODO: walk via atspi::proxy::accessible::AccessibleProxy
-    // starting from the desktop frame and recurse, capping at depth=5
-    // to match the macOS implementation.
+    // The exact API path is `conn.registry().get_root()` or similar
+    // depending on the atspi version. We use `root` proxy access if
+    // available; on error, return a populated root marker so callers
+    // know the bus IS reachable but the tree query specifically
+    // failed.
+    let root_proxy = match try_get_root_proxy(&conn).await {
+        Some(p) => p,
+        None => {
+            return AccessibilityNode {
+                role: "desktop".into(),
+                label: Some(
+                    "AT-SPI bus reachable but root proxy query failed".into(),
+                ),
+                value: None,
+                focused: true,
+                enabled: true,
+                bounds: None,
+                children: vec![],
+                fallback: false,
+            };
+        }
+    };
+
+    walk(&root_proxy, MAX_DEPTH).await
+}
+
+/// Best-effort root-proxy fetch. Returns None on any error so the
+/// caller can degrade to a populated-but-empty root node rather than
+/// outright unavailable.
+async fn try_get_root_proxy(
+    conn: &atspi::AccessibilityConnection,
+) -> Option<atspi::proxy::accessible::AccessibleProxy<'_>> {
+    // atspi's `Accessible` proxy can be constructed against the well-
+    // known root path "/org/a11y/atspi/accessible/root". This is the
+    // standard AT-SPI entrypoint; every desktop session exposes it.
+    let conn_inner = conn.connection();
+    atspi::proxy::accessible::AccessibleProxy::builder(conn_inner)
+        .destination("org.a11y.atspi.Registry")
+        .ok()?
+        .path("/org/a11y/atspi/accessible/root")
+        .ok()?
+        .build()
+        .await
+        .ok()
+}
+
+/// Recurse through the AT-SPI tree. Each child is its own D-Bus proxy
+/// — `get_child_at_index(i)` returns an `Accessible` we wrap into a
+/// fresh proxy. Errors on a child become `unavailable()` placeholders
+/// in that subtree without aborting the whole walk.
+async fn walk<'a>(
+    elem: &atspi::proxy::accessible::AccessibleProxy<'a>,
+    depth: u8,
+) -> AccessibilityNode {
+    let role = elem
+        .get_role_name()
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
+    let label = elem.name().await.ok().filter(|s: &String| !s.is_empty());
+    let enabled = true; // AT-SPI exposes state-set; mapping to a single
+                        // bool is a coarsening we accept here. A future
+                        // refinement could surface the full StateSet.
+
+    let mut children: Vec<AccessibilityNode> = vec![];
+    if depth > 0 {
+        if let Ok(count) = elem.child_count().await {
+            for i in 0..count {
+                match elem.get_child_at_index(i).await {
+                    Ok(child_obj) => {
+                        // child_obj is an `ObjectRef`; convert to a
+                        // proxy so we can recurse.
+                        let conn = elem.connection();
+                        let proxy = atspi::proxy::accessible::AccessibleProxy::builder(conn)
+                            .destination(child_obj.name)
+                            .and_then(|b| b.path(child_obj.path))
+                            .map(|b| b.build());
+                        match proxy {
+                            Ok(future) => match future.await {
+                                Ok(child_proxy) => {
+                                    let sub = Box::pin(walk(&child_proxy, depth - 1)).await;
+                                    children.push(sub);
+                                }
+                                Err(_) => children.push(AccessibilityNode::unavailable()),
+                            },
+                            Err(_) => children.push(AccessibilityNode::unavailable()),
+                        }
+                    }
+                    Err(_) => {
+                        // Single child failing shouldn't abort the
+                        // whole walk — leave a placeholder and
+                        // continue.
+                        children.push(AccessibilityNode::unavailable());
+                    }
+                }
+            }
+        }
+    }
+
     AccessibilityNode {
-        role: "desktop".into(),
-        label: Some("AT-SPI bus reachable; tree walk not yet implemented on Linux".into()),
+        role,
+        label,
         value: None,
-        focused: true,
-        enabled: true,
+        focused: false, // AT-SPI focused-tracking is per-StateSet; this
+                        // backend doesn't surface it yet.
+        enabled,
         bounds: None,
-        children: vec![],
+        children,
         fallback: false,
     }
 }

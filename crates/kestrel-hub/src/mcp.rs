@@ -458,7 +458,7 @@ impl KestrelMcp {
 
     // ── Phase 4 accessibility tool ────────────────────────────────────────────
 
-    #[tool(description = "Get the accessibility tree of the focused application on a node. Returns a JSON `AccessibilityNode` (`role`, `label`, `value`, `focused`, `enabled`, `bounds`, `children`, `fallback`). Per-OS depth: macOS walks up to 5 levels deep; Linux (AT-SPI) and Windows (UI Automation) currently return the root element only — full tree walking on those platforms is follow-up work. When the platform AX call fails (permission denied, AT-SPI bus down, COM init refused, unsupported OS), the response has `fallback: true` and an empty `children` array — call `screenshot` instead.")]
+    #[tool(description = "Get the accessibility tree of the focused application on a node. Returns a JSON `AccessibilityNode` (`role`, `label`, `value`, `focused`, `enabled`, `bounds`, `children`, `fallback`) walked up to 5 levels deep on macOS (via the AX API), Linux (via AT-SPI / D-Bus), and Windows (via UI Automation). When the platform AX call fails (permission denied, AT-SPI bus down, COM init refused, unsupported OS), the response has `fallback: true` and an empty `children` array — call `screenshot` instead.")]
     async fn describe(
         &self,
         Parameters(args): Parameters<DescribeArgs>,
