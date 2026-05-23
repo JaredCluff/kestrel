@@ -270,6 +270,13 @@ pub async fn delete_node(
     let had_live_state = supervisor_removed.is_some();
     if let Some(handle) = supervisor_removed {
         handle.abort();
+        // Await the aborted task so it can't perform any further writes into
+        // the registry maps after this point. On the multi-threaded runtime
+        // `abort()` only takes effect at the task's next yield, so without
+        // this await a supervisor mid-`register`/`mark_reconnecting` could
+        // race past our forget_node call and leave a ghost row behind.
+        // Cancelled tasks return JoinError; treat that as success.
+        let _ = handle.await;
     }
     if had_live_state {
         state.registry.forget_node(&node_id).await;
