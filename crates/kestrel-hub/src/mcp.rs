@@ -97,8 +97,6 @@ pub struct ShellPtyArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DescribeArgs {
     pub node_id: String,
-    /// Display index (0-based). Currently ignored on the agent — always describes the focused app.
-    pub display: Option<u8>,
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -342,14 +340,17 @@ impl KestrelMcp {
 
     // ── Phase 4 accessibility tool ────────────────────────────────────────────
 
-    #[tool(description = "Get the accessibility tree of the focused application on a node. Returns a JSON tree of UI elements with role, label, focused, enabled, and children. Requires Accessibility permission on macOS; returns {\"fallback\":true} if denied.")]
+    #[tool(description = "Get the accessibility tree of the focused application on a node. Returns a JSON `AccessibilityNode` (`role`, `label`, `value`, `focused`, `enabled`, `bounds`, `children`, `fallback`) walked up to 5 levels deep. macOS-only; on non-macOS or when Accessibility permission is denied, the response has `fallback: true` and an empty `children` array — call `screenshot` instead.")]
     async fn describe(
         &self,
         Parameters(args): Parameters<DescribeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        // The proto carries a `display` field on DescribeReq for future use,
+        // but the agent's AX walker always describes the focused application
+        // regardless of display, so we always send 0.
         let tree = self
             .registry
-            .describe(&args.node_id, args.display.unwrap_or(0))
+            .describe(&args.node_id, 0)
             .await
             .map_err(|e| Self::node_err("describe", &args.node_id, e))?;
         let json = serde_json::to_string_pretty(&tree)
