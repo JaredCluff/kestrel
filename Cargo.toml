@@ -34,7 +34,7 @@ portable-pty = "0.8"
 accessibility     = "0.2"
 accessibility-sys = "0.2"
 objc              = "0.2"
-axum         = { version = "0.7", features = ["macros"] }
+axum         = { version = "0.7", features = ["macros", "ws"] }
 axum-server  = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls_23    = { package = "rustls", version = "0.23", default-features = false, features = ["ring", "std"] }
 tower        = "0.5"

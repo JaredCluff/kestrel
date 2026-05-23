@@ -148,6 +148,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/layout/:node_id", axum::routing::delete(api::delete_layout))
         .route("/api/events", get(api::events_handler))
         .route("/api/screenshot/:node_id", get(api::screenshot_handler))
+        .route("/shell/:node_id", get(api::shell_page))
+        .route("/api/shell/ws/:node_id", get(api::shell_ws))
         .route("/assets/:name", get(asset_handler))
         .with_state(state)
 }
@@ -157,12 +159,14 @@ pub fn router(state: AppState) -> Router {
 const ASSET_DASHBOARD_CSS: &[u8] = include_bytes!("../../assets/dashboard.css");
 const ASSET_HTMX_MIN_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
 const ASSET_HTMX_SSE_JS: &[u8] = include_bytes!("../../assets/htmx-sse.js");
+const ASSET_SHELL_JS: &[u8] = include_bytes!("../../assets/shell.js");
 
 async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
     let (bytes, mime): (&'static [u8], &'static str) = match name.as_str() {
         "dashboard.css" => (ASSET_DASHBOARD_CSS, "text/css; charset=utf-8"),
         "htmx.min.js" => (ASSET_HTMX_MIN_JS, "application/javascript; charset=utf-8"),
         "htmx-sse.js" => (ASSET_HTMX_SSE_JS, "application/javascript; charset=utf-8"),
+        "shell.js" => (ASSET_SHELL_JS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
