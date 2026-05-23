@@ -140,3 +140,45 @@ p.error {
     color: var(--accent);
     margin-top: 16px;
 }
+
+/* Header auth indicator (Sign in / Sign out) pinned to the right. */
+header { display: flex; align-items: baseline; gap: 12px; }
+header .auth { margin-left: auto; font-size: 13px; }
+header .auth a, header .auth .linkish { color: var(--muted); text-decoration: none; }
+header .auth a:hover, header .auth .linkish:hover { color: var(--fg); }
+
+/* "Linkish" button — looks like a link but is actually a form button. */
+button.linkish {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+}
+button.linkish:hover { color: var(--fg); }
+
+/* Per-row Remove action column, right-aligned and quiet. */
+td.actions {
+    text-align: right;
+    width: 80px;
+}
+td.actions form { display: inline; margin: 0; }
+
+/* Add-node form below the table — same row of small inputs as elsewhere. */
+form.addnode {
+    margin-top: 24px;
+    gap: 8px;
+}
+form.addnode input[type="text"] {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--divider);
+    font: inherit;
+}
+form.addnode input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent);
+}
