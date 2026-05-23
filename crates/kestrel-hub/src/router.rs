@@ -605,6 +605,7 @@ mod tests {
             displays: vec![],
             clipboard: None,
             shells: vec![],
+            screen_fingerprint: None,
             last_observed_unix: ts,
         }
     }

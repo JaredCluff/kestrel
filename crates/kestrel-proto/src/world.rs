@@ -33,6 +33,13 @@ pub struct WorldState {
     pub displays: Vec<crate::message::DisplayInfo>,
     pub clipboard: Option<ClipboardMetadata>,
     pub shells: Vec<ShellSession>,
+    /// Phase 6 follow-up: a coarse "what does the screen look like"
+    /// fingerprint. Lets the AI detect screen change without paying
+    /// the cost of a full screenshot. 16 hex chars of SHA-256 over
+    /// a downsampled luminance grid (8×8 = 64 cells); two screens
+    /// with the same average brightness in the same regions get the
+    /// same fingerprint. None when no display is available.
+    pub screen_fingerprint: Option<String>,
     /// Unix seconds at the moment the agent observed this state.
     /// Used by `world_diff_since(t)` to return null when t > this.
     pub last_observed_unix: u64,
@@ -142,6 +149,7 @@ mod tests {
                 byte_len: 7,
                 fingerprint_hex: "deadbeefdeadbeef".into(),
             }),
+            screen_fingerprint: None,
             shells: vec![ShellSession {
                 pty_id: 1,
                 alive: true,

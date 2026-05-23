@@ -514,6 +514,7 @@ mod tests {
                         buffered_bytes: 4096,
                         last_write_unix: 1748000000,
                     }],
+                    screen_fingerprint: Some("aabbccddeeff0011".into()),
                     last_observed_unix: 1748010000,
                 },
             },
