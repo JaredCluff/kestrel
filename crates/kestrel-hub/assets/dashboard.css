@@ -275,3 +275,15 @@ pre.shell-output {
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 #shell-form input:focus { outline: none; border-color: var(--accent); }
+
+/* Focused-app cell — quiet, truncated, monospace-ish for app names. */
+td.focused {
+    color: var(--fg);
+    width: 200px;
+}
+td.focused .app {
+    color: var(--fg);
+}
+td.focused .muted {
+    color: var(--muted);
+}
