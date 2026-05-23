@@ -383,6 +383,25 @@ impl NodeRegistry {
         self.get(node_id).await?.describe(display).await
     }
 
+    // ── Phase 12b plugin proxy ────────────────────────────────────────────────
+
+    pub async fn plugin_list(&self, node_id: &str) -> anyhow::Result<Vec<kestrel_proto::PluginInfoWire>> {
+        self.get(node_id).await?.plugin_list().await
+    }
+
+    pub async fn plugin_invoke(
+        &self,
+        node_id: &str,
+        plugin: String,
+        tool: String,
+        args_json: String,
+    ) -> anyhow::Result<String> {
+        self.get(node_id)
+            .await?
+            .plugin_invoke(plugin, tool, args_json)
+            .await
+    }
+
     // ── Phase 3 shell ─────────────────────────────────────────────────────────
 
     pub async fn run_shell(&self, node_id: &str, command: &str) -> anyhow::Result<String> {
