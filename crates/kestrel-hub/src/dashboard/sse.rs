@@ -8,13 +8,22 @@ use futures::stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::dashboard::templates::nodes_rows;
+use crate::dashboard::templates::nodes_rows_with_controls;
 use crate::router::NodeRegistry;
 
-/// Build an SSE stream that emits a `<tbody>` fragment on every node-status change.
-/// The first event is sent immediately with the current snapshot so a fresh page paints quickly.
+/// Build an SSE stream that emits a `<tbody>` fragment on every
+/// node-status change. The first event is sent immediately with the
+/// current snapshot so a fresh page paints quickly.
+///
+/// `authed` is captured at SSE-connection-open time. Renders include the
+/// per-row Remove buttons iff the browser was authenticated when it
+/// opened the stream. Auth changes mid-stream (e.g. session expiry)
+/// don't update the row-level controls until the page is reloaded —
+/// acceptable since deletes are gated server-side anyway and an
+/// unauthenticated click would 303 back through /login.
 pub fn stream(
     registry: Arc<NodeRegistry>,
+    authed: bool,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static> {
     let initial = registry.clone();
     let rx_registry = registry.clone();
@@ -23,7 +32,7 @@ pub fn stream(
         let snap = initial.status_snapshot().await;
         Ok(Event::default()
             .event("nodes")
-            .data(nodes_rows(&snap).into_string()))
+            .data(nodes_rows_with_controls(&snap, authed).into_string()))
     };
     let initial_stream = futures::stream::once(initial_snapshot);
 
@@ -41,7 +50,7 @@ pub fn stream(
             let snap = registry.status_snapshot().await;
             Ok(Event::default()
                 .event("nodes")
-                .data(nodes_rows(&snap).into_string()))
+                .data(nodes_rows_with_controls(&snap, authed).into_string()))
         }
     });
 
@@ -60,7 +69,7 @@ mod tests {
         registry.mark_reconnecting("a", 1).await;
 
         let snap = registry.status_snapshot().await;
-        let body = nodes_rows(&snap).into_string();
+        let body = nodes_rows_with_controls(&snap, false).into_string();
 
         assert!(
             body.contains("reconnecting"),
@@ -79,6 +88,6 @@ mod tests {
         // Smoke test that constructing the SSE stream does not panic, and that the
         // returned Sse type compiles into a valid axum response type.
         let registry = Arc::new(NodeRegistry::new());
-        let _sse: Sse<_> = stream(registry);
+        let _sse: Sse<_> = stream(registry, false);
     }
 }

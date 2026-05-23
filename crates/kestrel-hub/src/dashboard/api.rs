@@ -222,23 +222,24 @@ fn check_auth(
     ))
 }
 
-/// POST /api/nodes — body: { node_id, address }
-/// Atomically (under config_write_lock): mutates config file, spawns supervisor.
-/// Requires `Authorization: Bearer <control_token>` when auth is enabled.
-pub async fn post_node(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<AddNodeBody>,
-) -> Result<(StatusCode, axum::Json<NodeStatusDto>), (StatusCode, String)> {
-    check_auth(&state, &headers)?;
-    let address: std::net::SocketAddr = body.address.parse()
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid address: {}", e)))?;
-
+/// Core add-node logic shared by `POST /api/nodes` (JSON) and the UI form
+/// handler. Returns the seeded NodeStatusDto on success. Errors are
+/// (status, message) tuples for direct return.
+///
+/// The `address` argument is the already-parsed SocketAddr — callers parse
+/// from their own input shape (JSON body, form field) and surface
+/// appropriate errors. Everything else (config lock, file mutation,
+/// registry seed, supervisor spawn) is identical across callers.
+async fn add_node_impl(
+    state: &AppState,
+    node_id: &str,
+    address: std::net::SocketAddr,
+) -> Result<NodeStatusDto, (StatusCode, String)> {
     let _lock = state.config_write_lock.lock().await;
 
     let mut doc = load_doc(&state.config_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    add_node(&mut doc, &body.node_id, address)
+    add_node(&mut doc, node_id, address)
         .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
     save_doc(&state.config_path, &doc)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -248,26 +249,23 @@ pub async fn post_node(
     // this, the supervisor's own `mark_reconnecting` call happens
     // asynchronously after this handler returns, leaving a race window where
     // the POST response says "Reconnecting" but a racing GET sees no node.
-    state.registry.mark_reconnecting(&body.node_id, 0).await;
+    state.registry.mark_reconnecting(node_id, 0).await;
 
     let handle = supervisor::spawn(
-        crate::config::NodeConfig { node_id: body.node_id.clone(), address },
+        crate::config::NodeConfig { node_id: node_id.into(), address },
         state.registry.clone(),
         state.master_secret.clone(),
     );
-    state.supervisors.write().await.insert(body.node_id.clone(), handle);
+    state.supervisors.write().await.insert(node_id.into(), handle);
 
-    // Now that the registry has been seeded, return its actual view (not a
-    // fabricated DTO) so the client sees the same state a follow-up
-    // `GET /api/nodes` would return for this row.
     let snap = state.registry.status_snapshot().await;
     let dto = snap
         .iter()
-        .find(|s| s.node_id == body.node_id)
+        .find(|s| s.node_id == node_id)
         .map(NodeStatusDto::from)
         .unwrap_or_else(|| NodeStatusDto {
             // Defensive fallback — should be unreachable now that we seeded.
-            node_id: body.node_id.clone(),
+            node_id: node_id.into(),
             state: NodeStateDto::Reconnecting,
             os_name: None,
             latency_ms: None,
@@ -275,51 +273,55 @@ pub async fn post_node(
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
             next_retry_in_ms: None,
         });
+    Ok(dto)
+}
+
+/// POST /api/nodes — body: { node_id, address }
+/// Atomically (under config_write_lock): mutates config file, spawns supervisor.
+/// Requires `Authorization: Bearer <control_token>` (or a valid session
+/// cookie) when auth is enabled.
+pub async fn post_node(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<AddNodeBody>,
+) -> Result<(StatusCode, axum::Json<NodeStatusDto>), (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    let address: std::net::SocketAddr = body.address.parse()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid address: {}", e)))?;
+    let dto = add_node_impl(&state, &body.node_id, address).await?;
     Ok((StatusCode::CREATED, axum::Json(dto)))
 }
 
 /// DELETE /api/nodes/:node_id
 /// Atomically (under config_write_lock): mutates config file, aborts supervisor, forgets node.
 /// Requires `Authorization: Bearer <control_token>` when auth is enabled.
-pub async fn delete_node(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(node_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    check_auth(&state, &headers)?;
+/// Core delete-node logic shared by `DELETE /api/nodes/:id` and the UI
+/// form handler. Errors are (status, message) tuples. The supervisor
+/// abort-then-await ordering (the Pass-9 fix) is preserved here — see
+/// the original handler comments for the race that prevents.
+async fn delete_node_impl(
+    state: &AppState,
+    node_id: &str,
+) -> Result<(), (StatusCode, String)> {
     let _lock = state.config_write_lock.lock().await;
 
     let mut doc = load_doc(&state.config_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // Distinguish "node not present" (Ok(false)) from structural config
-    // errors (Err). The latter should surface as 500, not as a misleading
-    // 404 — the operator needs to know their config is broken.
-    let in_config = try_remove_node(&mut doc, &node_id)
+    let in_config = try_remove_node(&mut doc, node_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if in_config {
         save_doc(&state.config_path, &doc)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
-    // Tear down live state (supervisor task + registry entry) regardless of
-    // whether the config-file row was present. A node that was added live
-    // but later edited out of the config externally would otherwise leak a
-    // running supervisor. We need at least ONE side to have evidence of the
-    // node for this to be a 204; if neither has it, the request was bogus.
-    let supervisor_removed = state.supervisors.write().await.remove(&node_id);
+    let supervisor_removed = state.supervisors.write().await.remove(node_id);
     let had_live_state = supervisor_removed.is_some();
     if let Some(handle) = supervisor_removed {
         handle.abort();
-        // Await the aborted task so it can't perform any further writes into
-        // the registry maps after this point. On the multi-threaded runtime
-        // `abort()` only takes effect at the task's next yield, so without
-        // this await a supervisor mid-`register`/`mark_reconnecting` could
-        // race past our forget_node call and leave a ghost row behind.
-        // Cancelled tasks return JoinError; treat that as success.
         let _ = handle.await;
     }
     if had_live_state {
-        state.registry.forget_node(&node_id).await;
+        state.registry.forget_node(node_id).await;
     }
 
     if !in_config && !had_live_state {
@@ -328,7 +330,16 @@ pub async fn delete_node(
             format!("node '{}' not found in config or live state", node_id),
         ));
     }
+    Ok(())
+}
 
+pub async fn delete_node(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(node_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    delete_node_impl(&state, &node_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -408,6 +419,93 @@ pub async fn logout() -> axum::response::Response {
             .insert(axum::http::header::SET_COOKIE, hv);
     }
     response
+}
+
+/// Quick boolean variant of `check_auth` for callers that only need to
+/// decide which header section / form controls to render. Returns `true`
+/// when auth is disabled (so write controls are usable for a no-auth
+/// install) OR when a valid bearer/cookie credential is present.
+pub fn is_authenticated(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
+    check_auth(state, headers).is_ok()
+}
+
+// -------- UI write handlers -------------------------------------------------
+//
+// Form-driven counterparts to POST /api/nodes (JSON) and DELETE
+// /api/nodes/:id. The UI handlers parse application/x-www-form-urlencoded
+// bodies and respond with redirects so the browser ends up at `/` after
+// success — the standard POST/Redirect/GET pattern.
+//
+// On auth failure these handlers redirect to /login rather than returning
+// a bare 401. The user is already in a browser; a redirect is the right
+// UX. (Programmatic callers hitting these endpoints will see the 303 and
+// can follow the Location header if they want.)
+
+#[derive(serde::Deserialize)]
+pub struct UiAddNodeForm {
+    pub node_id: String,
+    pub address: String,
+}
+
+pub async fn ui_add_node(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Form(form): axum::Form<UiAddNodeForm>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_authenticated(&state, &headers) {
+        return axum::response::Redirect::to("/login").into_response();
+    }
+    let address: std::net::SocketAddr = match form.address.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            // Re-render the dashboard with an inline error rather than
+            // bouncing the user to a separate error page.
+            let snapshot = state.registry.status_snapshot().await;
+            return (
+                StatusCode::BAD_REQUEST,
+                crate::dashboard::templates::page_with_error(
+                    &snapshot,
+                    true,
+                    &format!("Invalid address '{}': {}", form.address, e),
+                ),
+            )
+                .into_response();
+        }
+    };
+    match add_node_impl(&state, &form.node_id, address).await {
+        Ok(_) => axum::response::Redirect::to("/").into_response(),
+        Err((status, msg)) => {
+            let snapshot = state.registry.status_snapshot().await;
+            (
+                status,
+                crate::dashboard::templates::page_with_error(&snapshot, true, &msg),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn ui_delete_node(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(node_id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_authenticated(&state, &headers) {
+        return axum::response::Redirect::to("/login").into_response();
+    }
+    match delete_node_impl(&state, &node_id).await {
+        Ok(()) => axum::response::Redirect::to("/").into_response(),
+        Err((status, msg)) => {
+            let snapshot = state.registry.status_snapshot().await;
+            (
+                status,
+                crate::dashboard::templates::page_with_error(&snapshot, true, &msg),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]

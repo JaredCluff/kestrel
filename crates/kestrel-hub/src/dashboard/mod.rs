@@ -84,6 +84,8 @@ pub fn router(state: AppState) -> Router {
         .route("/sse", get(sse_handler))
         .route("/login", get(api::login_form).post(api::login_submit))
         .route("/logout", axum::routing::post(api::logout))
+        .route("/ui/nodes", axum::routing::post(api::ui_add_node))
+        .route("/ui/nodes/:node_id/delete", axum::routing::post(api::ui_delete_node))
         .route("/api/nodes", get(api::nodes_json).post(api::post_node))
         .route("/api/nodes/:node_id", axum::routing::delete(api::delete_node))
         .route("/api/events", get(api::events_handler))
@@ -107,18 +109,24 @@ async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
 }
 
-async fn index(axum::extract::State(state): axum::extract::State<AppState>) -> maud::Markup {
+async fn index(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> maud::Markup {
     let snapshot = state.registry.status_snapshot().await;
-    templates::page(&snapshot)
+    let authed = api::is_authenticated(&state, &headers);
+    templates::page(&snapshot, authed)
 }
 
 async fn sse_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::sse::Sse<
     impl futures::stream::Stream<
         Item = Result<axum::response::sse::Event, std::convert::Infallible>,
     > + Send
     + 'static,
 > {
-    sse::stream(state.registry)
+    let authed = api::is_authenticated(&state, &headers);
+    sse::stream(state.registry, authed)
 }
