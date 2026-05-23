@@ -108,11 +108,34 @@ pub struct WorldDiffArgs {
     pub since_unix_secs: u64,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct JobStartShellArgs {
+    pub node_id: String,
+    pub command: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct JobIdArgs {
+    pub job_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct JobOutputArgs {
+    pub job_id: String,
+    /// Byte offset within the job's accumulated output to start
+    /// reading from. Pass 0 on the first call; pass the returned
+    /// `new_offset` on subsequent calls to stream incrementally.
+    pub since_offset: usize,
+}
+
 // ── Server ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct KestrelMcp {
     registry: Arc<NodeRegistry>,
+    /// Phase 7: shared job registry. Created here so every
+    /// MCP-invocation-routed handler can dispatch async jobs.
+    jobs: crate::jobs::JobRegistry,
     audit: crate::audit::AuditLogger,
     tool_router: ToolRouter<KestrelMcp>,
 }
@@ -126,8 +149,10 @@ impl KestrelMcp {
     /// Construct with a specific audit logger. `kestrel-hub start` wires
     /// a file-backed logger here; tests use [`AuditLogger::disabled`].
     pub fn with_audit(registry: Arc<NodeRegistry>, audit: crate::audit::AuditLogger) -> Self {
+        let jobs = crate::jobs::JobRegistry::new(registry.clone());
         KestrelMcp {
             registry,
+            jobs,
             audit,
             tool_router: Self::tool_router(),
         }
@@ -530,6 +555,91 @@ impl KestrelMcp {
                 }
                 None => Ok(CallToolResult::success(vec![Content::text("null")])),
             }
+        })
+        .await
+    }
+
+    // ── Phase 7 async job tools ───────────────────────────────────────────
+
+    #[tool(description = "Start a shell command as an async job. Returns a job_id immediately; poll with `job_status` and `job_output` to track. Use this instead of `shell_run` when a command might take longer than 30 seconds. The underlying agent operation still runs to completion even if the AI's turn ends — use `job_cancel` to stop one that's no longer needed.")]
+    async fn job_start_shell(
+        &self,
+        Parameters(args): Parameters<JobStartShellArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let node_id = args.node_id.clone();
+        let summary = format!("command={}", args.command);
+        self.audit_call("job_start_shell", &node_id, summary, || async move {
+            let job_id = self
+                .jobs
+                .start_shell(args.node_id.clone(), args.command.clone())
+                .await;
+            Ok(CallToolResult::success(vec![Content::text(job_id)]))
+        })
+        .await
+    }
+
+    #[tool(description = "Get the current status of an async job: pending / running / completed / failed / cancelled. Includes exit_code (for completed shell jobs), error message (for failed jobs), created_unix and completed_unix timestamps, and the args_summary. Output bytes are NOT in this response — use `job_output` to stream them.")]
+    async fn job_status(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let job_id = args.job_id.clone();
+        self.audit_call("job_status", &job_id, String::new(), || async move {
+            match self.jobs.status(&args.job_id).await {
+                Some(job) => {
+                    let json = serde_json::to_string_pretty(&job)
+                        .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                }
+                None => Err(McpError::invalid_params(
+                    format!("unknown job_id '{}'", args.job_id),
+                    None,
+                )),
+            }
+        })
+        .await
+    }
+
+    #[tool(description = "Stream output from an async job starting at `since_offset`. Returns the bytes since that offset (UTF-8 lossily decoded) plus a `new_offset` to pass on the next call. Returns an empty string when no new bytes have arrived since `since_offset`. Pass 0 on the first call to get everything so far.")]
+    async fn job_output(
+        &self,
+        Parameters(args): Parameters<JobOutputArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let job_id = args.job_id.clone();
+        let summary = format!("since={}", args.since_offset);
+        self.audit_call("job_output", &job_id, summary, || async move {
+            match self.jobs.output_since(&args.job_id, args.since_offset).await {
+                Some((bytes, new_offset)) => {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    // Return a small JSON envelope so callers can grab the
+                    // new offset programmatically without parsing the
+                    // output for sentinels.
+                    let json = serde_json::json!({
+                        "text": text,
+                        "new_offset": new_offset,
+                    });
+                    Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+                }
+                None => Err(McpError::invalid_params(
+                    format!("unknown job_id '{}'", args.job_id),
+                    None,
+                )),
+            }
+        })
+        .await
+    }
+
+    #[tool(description = "Mark an async job as cancelled. Does NOT abort the underlying agent operation (that's a follow-up); for shell jobs the existing 30-second timeout on the agent caps any runaway. Output captured up to the cancel point stays available via `job_output`.")]
+    async fn job_cancel(
+        &self,
+        Parameters(args): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let job_id = args.job_id.clone();
+        self.audit_call("job_cancel", &job_id, String::new(), || async move {
+            let cancelled = self.jobs.cancel(&args.job_id).await;
+            Ok(CallToolResult::success(vec![Content::text(
+                cancelled.to_string(),
+            )]))
         })
         .await
     }

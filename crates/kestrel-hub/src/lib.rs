@@ -3,6 +3,7 @@ pub mod client;
 pub mod config;
 pub mod dashboard;
 pub mod enrollment;
+pub mod jobs;
 pub mod events;
 pub mod kvm;
 pub mod mcp;
