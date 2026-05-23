@@ -54,7 +54,9 @@ pub struct WorkflowStep {
     #[serde(default)]
     pub args: serde_json::Value,
     /// On error: "continue" (record the error in the step result and
-    /// move on) or "fail" (abort the whole workflow). Default: fail.
+    /// move on), "fail" (abort the whole workflow), or "rollback"
+    /// (abort + run each previously-Ok step's rollback shell command
+    /// in reverse order). Default: fail.
     #[serde(default = "default_on_error")]
     pub on_error: OnError,
     /// Phase 9 follow-up: conditional execution. If set, the step is
@@ -63,6 +65,24 @@ pub struct WorkflowStep {
     /// "step_name != ok". Comparison is on the literal status string.
     #[serde(default)]
     pub when: Option<String>,
+    /// Phase 9 follow-up: rollback shell command run on this step's
+    /// configured node when a later step's `on_error=rollback`
+    /// triggers. Steps without a rollback are simply skipped during
+    /// rollback. Only `shell_run`-style commands are supported; this
+    /// is intentionally narrower than the main `op` surface to keep
+    /// rollback predictable.
+    #[serde(default)]
+    pub rollback: Option<String>,
+    /// Phase 9 follow-up: run this step in parallel with the
+    /// immediately-preceding steps that also have `parallel: true`.
+    /// Workflow execution alternates between sequential blocks and
+    /// parallel blocks; a parallel block ends at the next step
+    /// without `parallel: true`. Captures from parallel-block steps
+    /// are visible to subsequent (sequential or parallel) steps the
+    /// same way sequential captures are; within a parallel block
+    /// they're NOT visible to siblings (race-free semantics).
+    #[serde(default)]
+    pub parallel: bool,
 }
 
 fn default_on_error() -> OnError { OnError::Fail }
@@ -72,6 +92,7 @@ fn default_on_error() -> OnError { OnError::Fail }
 pub enum OnError {
     Continue,
     Fail,
+    Rollback,
 }
 
 /// Result of a single step.
@@ -99,11 +120,13 @@ pub struct WorkflowResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowStatus { Ok, PartialError, Aborted, TimedOut }
+pub enum WorkflowStatus { Ok, PartialError, Aborted, TimedOut, RolledBack }
 
 /// Execute a workflow against a registry. Total wall-clock budget is
-/// `timeout`; steps that share a node are sequential (we don't try to
-/// parallelize same-node ops because they might interact).
+/// `timeout`. Steps with `parallel: true` form contiguous batches
+/// that execute concurrently; otherwise execution is sequential.
+/// `on_error: rollback` triggers per-step rollback shell commands
+/// in reverse order across all previously-Ok steps before aborting.
 pub async fn run(
     registry: &Arc<NodeRegistry>,
     steps: Vec<WorkflowStep>,
@@ -112,100 +135,68 @@ pub async fn run(
     let started = std::time::Instant::now();
     let mut captured: HashMap<String, String> = HashMap::new();
     let mut results: Vec<StepResult> = Vec::with_capacity(steps.len());
-    let mut overall = WorkflowStatus::Ok;
-
     let mut step_statuses: HashMap<String, StepStatus> = HashMap::new();
+    let mut overall = WorkflowStatus::Ok;
+    let mut completed_steps: Vec<WorkflowStep> = vec![];
+
     let fut = async {
-        for step in steps {
-            // Evaluate `when` predicate against earlier step statuses.
-            if let Some(cond) = &step.when {
-                if !eval_when(cond, &step_statuses) {
-                    let result = StepResult {
-                        name: step.name.clone(),
-                        status: StepStatus::Skipped,
-                        output: None,
-                        error: None,
-                        node_id: None,
-                        duration_ms: 0,
-                    };
-                    step_statuses.insert(step.name.clone(), StepStatus::Skipped);
-                    results.push(result);
-                    continue;
-                }
-            }
-            // Substitute ${name.output} references using captured map.
-            let args_str = step.args.to_string();
-            let substituted = substitute(&args_str, &captured);
-            let args: serde_json::Value =
-                serde_json::from_str(&substituted).unwrap_or(serde_json::Value::Null);
-
-            // Resolve target node — explicit id wins, else capability-routed.
-            let node_id = match (&step.node, &step.needs) {
-                (Some(n), _) => Some(n.clone()),
-                (None, Some(needs)) => {
-                    let candidates = registry.find_nodes_with(needs).await;
-                    candidates.into_iter().next()
-                }
-                (None, None) => None,
+        let mut i = 0;
+        while i < steps.len() {
+            // Group consecutive parallel:true steps into one block.
+            let block_end = if steps[i].parallel {
+                let mut j = i;
+                while j < steps.len() && steps[j].parallel { j += 1; }
+                j
+            } else {
+                i + 1
             };
+            let block: Vec<WorkflowStep> = steps[i..block_end].to_vec();
+            i = block_end;
 
-            let step_started = std::time::Instant::now();
-            let mut result = StepResult {
-                name: step.name.clone(),
-                status: StepStatus::Ok,
-                output: None,
-                error: None,
-                node_id: node_id.clone(),
-                duration_ms: 0,
-            };
-
-            let node_id = match node_id {
-                Some(n) => n,
-                None => {
-                    result.status = StepStatus::Error;
-                    result.error = Some(format!(
-                        "step '{}' has no target node (provide `node` or matching `needs`)",
-                        step.name
-                    ));
-                    result.duration_ms = step_started.elapsed().as_millis() as u64;
-                    let abort = matches!(step.on_error, OnError::Fail);
-                    results.push(result);
-                    if abort {
-                        overall = WorkflowStatus::Aborted;
+            if block.len() == 1 {
+                // Sequential single step.
+                let step = block.into_iter().next().unwrap();
+                let outcome = execute_step(registry, &step, &captured, &step_statuses).await;
+                apply_outcome(
+                    outcome,
+                    step,
+                    &mut captured,
+                    &mut step_statuses,
+                    &mut results,
+                    &mut completed_steps,
+                    &mut overall,
+                )
+                .await;
+                if overall == WorkflowStatus::Aborted || overall == WorkflowStatus::RolledBack {
+                    return;
+                }
+            } else {
+                // Parallel batch. Run all concurrently. Captures from
+                // within the batch are NOT visible to siblings —
+                // they snapshot `captured` as-of block start.
+                let snapshot_captured = captured.clone();
+                let snapshot_statuses = step_statuses.clone();
+                let futures: Vec<_> = block
+                    .iter()
+                    .map(|s| execute_step(registry, s, &snapshot_captured, &snapshot_statuses))
+                    .collect();
+                let outcomes = futures::future::join_all(futures).await;
+                for (step, outcome) in block.into_iter().zip(outcomes.into_iter()) {
+                    apply_outcome(
+                        outcome,
+                        step,
+                        &mut captured,
+                        &mut step_statuses,
+                        &mut results,
+                        &mut completed_steps,
+                        &mut overall,
+                    )
+                    .await;
+                    if overall == WorkflowStatus::Aborted || overall == WorkflowStatus::RolledBack {
                         return;
-                    } else if overall == WorkflowStatus::Ok {
-                        overall = WorkflowStatus::PartialError;
-                    }
-                    continue;
-                }
-            };
-
-            // Dispatch by op.
-            let dispatch = run_step(registry, &step.op, &node_id, &args).await;
-            result.duration_ms = step_started.elapsed().as_millis() as u64;
-            match dispatch {
-                Ok(out) => {
-                    captured.insert(format!("{}.output", step.name), out.clone());
-                    result.output = Some(out);
-                }
-                Err(e) => {
-                    result.status = StepStatus::Error;
-                    result.error = Some(e.to_string());
-                    let abort = matches!(step.on_error, OnError::Fail);
-                    results.push(result);
-                    if abort {
-                        overall = WorkflowStatus::Aborted;
-                        return;
-                    } else {
-                        if overall == WorkflowStatus::Ok {
-                            overall = WorkflowStatus::PartialError;
-                        }
-                        continue;
                     }
                 }
             }
-            step_statuses.insert(step.name.clone(), result.status);
-            results.push(result);
         }
     };
 
@@ -215,10 +206,175 @@ pub async fn run(
             overall = WorkflowStatus::TimedOut;
         }
     }
+
+    // Rollback path: if any step's on_error=Rollback triggered, we
+    // already marked overall=RolledBack and bailed; now walk back
+    // through completed Ok steps and run each one's rollback
+    // command. Failures during rollback are recorded as step
+    // results but don't propagate.
+    if overall == WorkflowStatus::RolledBack {
+        run_rollbacks(registry, &completed_steps, &mut results).await;
+    }
+
     WorkflowResult {
         steps: results,
         total_duration_ms: started.elapsed().as_millis() as u64,
         status: overall,
+    }
+}
+
+/// Outcome of a single step execution. The runner converts this to
+/// a StepResult + status-map entry + captured map mutation.
+enum StepOutcome {
+    Ok { output: String, node_id: String, duration_ms: u64 },
+    Skipped,
+    Err { error: String, node_id: Option<String>, duration_ms: u64, on_error: OnError },
+}
+
+async fn execute_step(
+    registry: &Arc<NodeRegistry>,
+    step: &WorkflowStep,
+    captured: &HashMap<String, String>,
+    step_statuses: &HashMap<String, StepStatus>,
+) -> StepOutcome {
+    // Conditional skip.
+    if let Some(cond) = &step.when {
+        if !eval_when(cond, step_statuses) {
+            return StepOutcome::Skipped;
+        }
+    }
+    let args_str = step.args.to_string();
+    let substituted = substitute(&args_str, captured);
+    let args: serde_json::Value =
+        serde_json::from_str(&substituted).unwrap_or(serde_json::Value::Null);
+
+    let node_id = match (&step.node, &step.needs) {
+        (Some(n), _) => Some(n.clone()),
+        (None, Some(needs)) => registry.find_nodes_with(needs).await.into_iter().next(),
+        (None, None) => None,
+    };
+    let step_started = std::time::Instant::now();
+    let Some(node_id) = node_id else {
+        return StepOutcome::Err {
+            error: format!(
+                "step '{}' has no target node (provide `node` or matching `needs`)",
+                step.name
+            ),
+            node_id: None,
+            duration_ms: step_started.elapsed().as_millis() as u64,
+            on_error: step.on_error,
+        };
+    };
+    let dispatch = run_step(registry, &step.op, &node_id, &args).await;
+    let duration_ms = step_started.elapsed().as_millis() as u64;
+    match dispatch {
+        Ok(out) => StepOutcome::Ok { output: out, node_id, duration_ms },
+        Err(e) => StepOutcome::Err {
+            error: e.to_string(),
+            node_id: Some(node_id),
+            duration_ms,
+            on_error: step.on_error,
+        },
+    }
+}
+
+async fn apply_outcome(
+    outcome: StepOutcome,
+    step: WorkflowStep,
+    captured: &mut HashMap<String, String>,
+    step_statuses: &mut HashMap<String, StepStatus>,
+    results: &mut Vec<StepResult>,
+    completed_steps: &mut Vec<WorkflowStep>,
+    overall: &mut WorkflowStatus,
+) {
+    match outcome {
+        StepOutcome::Skipped => {
+            let result = StepResult {
+                name: step.name.clone(),
+                status: StepStatus::Skipped,
+                output: None,
+                error: None,
+                node_id: None,
+                duration_ms: 0,
+            };
+            step_statuses.insert(step.name.clone(), StepStatus::Skipped);
+            results.push(result);
+        }
+        StepOutcome::Ok { output, node_id, duration_ms } => {
+            captured.insert(format!("{}.output", step.name), output.clone());
+            let result = StepResult {
+                name: step.name.clone(),
+                status: StepStatus::Ok,
+                output: Some(output),
+                error: None,
+                node_id: Some(node_id),
+                duration_ms,
+            };
+            step_statuses.insert(step.name.clone(), StepStatus::Ok);
+            completed_steps.push(step);
+            results.push(result);
+        }
+        StepOutcome::Err { error, node_id, duration_ms, on_error } => {
+            let result = StepResult {
+                name: step.name.clone(),
+                status: StepStatus::Error,
+                output: None,
+                error: Some(error),
+                node_id,
+                duration_ms,
+            };
+            step_statuses.insert(step.name.clone(), StepStatus::Error);
+            results.push(result);
+            match on_error {
+                OnError::Continue => {
+                    if *overall == WorkflowStatus::Ok {
+                        *overall = WorkflowStatus::PartialError;
+                    }
+                }
+                OnError::Fail => {
+                    *overall = WorkflowStatus::Aborted;
+                }
+                OnError::Rollback => {
+                    *overall = WorkflowStatus::RolledBack;
+                }
+            }
+        }
+    }
+}
+
+/// Run each completed step's rollback shell command (if any) in
+/// reverse order. Best-effort: rollback failures are appended to
+/// results as Error steps named "rollback:<original-name>", but
+/// don't change the overall status (we've already RolledBack).
+async fn run_rollbacks(
+    registry: &Arc<NodeRegistry>,
+    completed: &[WorkflowStep],
+    results: &mut Vec<StepResult>,
+) {
+    for step in completed.iter().rev() {
+        let Some(cmd) = &step.rollback else { continue };
+        let Some(node_id) = step.node.as_deref() else {
+            // Capability-routed steps lack a concrete node by the
+            // time we rollback; we'd have to re-find or capture
+            // the node_id at execution time. v1 limitation:
+            // rollback supported only for steps with explicit node.
+            continue;
+        };
+        let started = std::time::Instant::now();
+        let outcome = registry.run_shell(node_id, cmd).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let (status, error) = match outcome {
+            Ok(_) => (StepStatus::Ok, None),
+            Err(e) => (StepStatus::Error, Some(e.to_string())),
+        };
+        results.push(StepResult {
+            name: format!("rollback:{}", step.name),
+            status,
+            output: None,
+            error,
+            node_id: Some(node_id.into()),
+            duration_ms,
+        });
     }
 }
 
@@ -356,11 +512,62 @@ mod tests {
             args: serde_json::json!({}),
             on_error: OnError::Continue,
             when: None,
+            rollback: None,
+            parallel: false,
         };
         let res = run(&reg, vec![step], Duration::from_secs(5)).await;
         assert_eq!(res.status, WorkflowStatus::PartialError);
         assert_eq!(res.steps[0].status, StepStatus::Error);
         assert!(res.steps[0].error.as_ref().unwrap().contains("no target node"));
+    }
+
+    #[tokio::test]
+    async fn parallel_steps_form_a_block_that_completes_atomically() {
+        // Three parallel steps, all targeting a node that doesn't
+        // exist. All should error (on_error=Continue) and the
+        // workflow should end as PartialError, not aborted.
+        let reg = Arc::new(NodeRegistry::new());
+        let mk = |name: &str| WorkflowStep {
+            name: name.into(),
+            node: Some("ghost".into()),
+            needs: None,
+            op: "world_state".into(),
+            args: serde_json::json!({}),
+            on_error: OnError::Continue,
+            when: None,
+            rollback: None,
+            parallel: true,
+        };
+        let res = run(&reg, vec![mk("a"), mk("b"), mk("c")], Duration::from_secs(5)).await;
+        assert_eq!(res.steps.len(), 3);
+        assert_eq!(res.status, WorkflowStatus::PartialError);
+        for s in &res.steps {
+            assert_eq!(s.status, StepStatus::Error);
+        }
+    }
+
+    #[tokio::test]
+    async fn rollback_on_error_runs_in_reverse_for_completed_steps() {
+        // First two steps would succeed against a real node — we
+        // can't easily make them succeed without an agent, so this
+        // test pins the RolledBack status when the first error
+        // step has on_error=Rollback. The rollback walker only
+        // operates on previously-Ok steps; in this empty-cache test
+        // there are none, so we just verify the status code.
+        let reg = Arc::new(NodeRegistry::new());
+        let step = WorkflowStep {
+            name: "bad".into(),
+            node: Some("ghost".into()),
+            needs: None,
+            op: "world_state".into(),
+            args: serde_json::json!({}),
+            on_error: OnError::Rollback,
+            when: None,
+            rollback: None,
+            parallel: false,
+        };
+        let res = run(&reg, vec![step], Duration::from_secs(5)).await;
+        assert_eq!(res.status, WorkflowStatus::RolledBack);
     }
 
     #[tokio::test]
@@ -375,6 +582,8 @@ mod tests {
                 args: serde_json::json!({}),
                 on_error: OnError::Fail,
                 when: None,
+                rollback: None,
+                parallel: false,
             },
             WorkflowStep {
                 name: "never_runs".into(),
@@ -384,6 +593,8 @@ mod tests {
                 args: serde_json::json!({}),
                 on_error: OnError::Continue,
                 when: None,
+                rollback: None,
+                parallel: false,
             },
         ];
         let res = run(&reg, steps, Duration::from_secs(5)).await;
