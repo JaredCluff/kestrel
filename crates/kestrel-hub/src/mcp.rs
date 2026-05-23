@@ -104,16 +104,53 @@ pub struct DescribeArgs {
 #[derive(Clone)]
 pub struct KestrelMcp {
     registry: Arc<NodeRegistry>,
+    audit: crate::audit::AuditLogger,
     tool_router: ToolRouter<KestrelMcp>,
 }
 
 #[tool_router]
 impl KestrelMcp {
     pub fn new(registry: Arc<NodeRegistry>) -> Self {
+        Self::with_audit(registry, crate::audit::AuditLogger::disabled())
+    }
+
+    /// Construct with a specific audit logger. `kestrel-hub start` wires
+    /// a file-backed logger here; tests use [`AuditLogger::disabled`].
+    pub fn with_audit(registry: Arc<NodeRegistry>, audit: crate::audit::AuditLogger) -> Self {
         KestrelMcp {
             registry,
+            audit,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Helper that wraps a tool body with timing + audit logging.
+    /// Captures start time, runs `work`, then emits one audit entry
+    /// regardless of success or failure. The entry's status mirrors the
+    /// outer `Result`. Cost when audit is disabled is just one timing
+    /// instant + the function call — no allocation, no I/O.
+    async fn audit_call<F, Fut, T>(
+        &self,
+        op: &'static str,
+        node_id: &str,
+        args_summary: String,
+        work: F,
+    ) -> Result<T, McpError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, McpError>>,
+    {
+        let start = std::time::Instant::now();
+        let result = work().await;
+        let dur_ms = start.elapsed().as_millis() as u64;
+        let (status, err_msg) = match &result {
+            Ok(_) => (crate::audit::CallStatus::Ok, None),
+            Err(e) => (crate::audit::CallStatus::Error, Some(format!("{:?}", e))),
+        };
+        self.audit
+            .log(op, node_id, &args_summary, status, dur_ms, err_msg.as_deref())
+            .await;
+        result
     }
 
     /// Wrap a registry-level error with operation context and a remediation hint
@@ -135,10 +172,13 @@ impl KestrelMcp {
 
     #[tool(description = "List all connected nodes with their OS and hostname")]
     async fn fleet_nodes(&self) -> Result<CallToolResult, McpError> {
-        let nodes = self.registry.list().await;
-        let json = serde_json::to_string_pretty(&nodes)
-            .unwrap_or_else(|e| format!("error: {e}"));
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        self.audit_call("fleet_nodes", "*", String::new(), || async {
+            let nodes = self.registry.list().await;
+            let json = serde_json::to_string_pretty(&nodes)
+                .unwrap_or_else(|e| format!("error: {e}"));
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
+        .await
     }
 
     #[tool(description = "Take a PNG screenshot of a node display")]
@@ -146,19 +186,24 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ScreenshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let png = self
-            .registry
-            .screenshot(&args.node_id, args.display.unwrap_or(0), None)
-            .await
-            .map_err(|e| Self::node_err("screenshot", &args.node_id, e))?;
-        if png.is_empty() {
-            return Err(McpError::internal_error(
-                "screenshot returned empty bytes".to_string(),
-                None,
-            ));
-        }
-        let b64 = general_purpose::STANDARD.encode(&png);
-        Ok(CallToolResult::success(vec![Content::image(b64, "image/png")]))
+        let node_id = args.node_id.clone();
+        let summary = format!("display={}", args.display.unwrap_or(0));
+        self.audit_call("screenshot", &node_id, summary, || async move {
+            let png = self
+                .registry
+                .screenshot(&args.node_id, args.display.unwrap_or(0), None)
+                .await
+                .map_err(|e| Self::node_err("screenshot", &args.node_id, e))?;
+            if png.is_empty() {
+                return Err(McpError::internal_error(
+                    "screenshot returned empty bytes".to_string(),
+                    None,
+                ));
+            }
+            let b64 = general_purpose::STANDARD.encode(&png);
+            Ok(CallToolResult::success(vec![Content::image(b64, "image/png")]))
+        })
+        .await
     }
 
     #[tool(description = "Type text on a node (Unicode-safe)")]
@@ -166,11 +211,18 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<TypeTextArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.registry
-            .type_text(&args.node_id, args.text)
-            .await
-            .map_err(|e| Self::node_err("type_text", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        // Don't log the typed text itself — it might contain passwords or
+        // other secrets the operator typed. Log only the length.
+        let summary = format!("len={}", args.text.chars().count());
+        self.audit_call("type_text", &node_id, summary, || async move {
+            self.registry
+                .type_text(&args.node_id, args.text)
+                .await
+                .map_err(|e| Self::node_err("type_text", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     #[tool(description = "Press a key combination on a node, e.g. [\"ctrl\", \"c\"]")]
@@ -178,17 +230,22 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<KeyComboArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let keys: Vec<KeyCode> = args
-            .keys
-            .iter()
-            .map(|s| kestrel_proto::parse_key_str(s))
-            .collect::<anyhow::Result<Vec<_>>>()
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        self.registry
-            .key_combo(&args.node_id, keys)
-            .await
-            .map_err(|e| Self::node_err("key_combo", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        let summary = format!("keys={:?}", args.keys);
+        self.audit_call("key_combo", &node_id, summary, || async move {
+            let keys: Vec<KeyCode> = args
+                .keys
+                .iter()
+                .map(|s| kestrel_proto::parse_key_str(s))
+                .collect::<anyhow::Result<Vec<_>>>()
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            self.registry
+                .key_combo(&args.node_id, keys)
+                .await
+                .map_err(|e| Self::node_err("key_combo", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     #[tool(description = "Move the mouse to normalized coordinates (0.0-1.0) on a node")]
@@ -196,11 +253,16 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<MouseMoveArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.registry
-            .mouse_move(&args.node_id, args.x, args.y)
-            .await
-            .map_err(|e| Self::node_err("mouse_move", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        let summary = format!("x={},y={}", args.x, args.y);
+        self.audit_call("mouse_move", &node_id, summary, || async move {
+            self.registry
+                .mouse_move(&args.node_id, args.x, args.y)
+                .await
+                .map_err(|e| Self::node_err("mouse_move", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     #[tool(description = "Click a mouse button at normalized coordinates on a node")]
@@ -208,22 +270,27 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<MouseClickArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let button = match args.button.to_lowercase().as_str() {
-            "left" => Button::Left,
-            "right" => Button::Right,
-            "middle" => Button::Middle,
-            other => {
-                return Err(McpError::invalid_params(
-                    format!("unknown button '{}'; use left, right, or middle", other),
-                    None,
-                ))
-            }
-        };
-        self.registry
-            .mouse_click(&args.node_id, button, args.x, args.y)
-            .await
-            .map_err(|e| Self::node_err("mouse_click", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        let summary = format!("button={},x={},y={}", args.button, args.x, args.y);
+        self.audit_call("mouse_click", &node_id, summary, || async move {
+            let button = match args.button.to_lowercase().as_str() {
+                "left" => Button::Left,
+                "right" => Button::Right,
+                "middle" => Button::Middle,
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!("unknown button '{}'; use left, right, or middle", other),
+                        None,
+                    ))
+                }
+            };
+            self.registry
+                .mouse_click(&args.node_id, button, args.x, args.y)
+                .await
+                .map_err(|e| Self::node_err("mouse_click", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     #[tool(description = "Scroll on a node (dy > 0 scrolls down, dx > 0 scrolls right)")]
@@ -231,11 +298,16 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ScrollArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.registry
-            .scroll(&args.node_id, args.dx, args.dy)
-            .await
-            .map_err(|e| Self::node_err("scroll", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        let summary = format!("dx={},dy={}", args.dx, args.dy);
+        self.audit_call("scroll", &node_id, summary, || async move {
+            self.registry
+                .scroll(&args.node_id, args.dx, args.dy)
+                .await
+                .map_err(|e| Self::node_err("scroll", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     // ── Phase 3 clipboard tools ───────────────────────────────────────────────
@@ -245,17 +317,21 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<NodeIdArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let content = self.registry
-            .clipboard_read(&args.node_id)
-            .await
-            .map_err(|e| Self::node_err("clipboard_read", &args.node_id, e))?;
-        let text = match content {
-            ClipboardContent::Text(t) => t,
-            ClipboardContent::Image { width, height, .. } => {
-                format!("[image {}x{}]", width, height)
-            }
-        };
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let node_id = args.node_id.clone();
+        self.audit_call("clipboard_read", &node_id, String::new(), || async move {
+            let content = self.registry
+                .clipboard_read(&args.node_id)
+                .await
+                .map_err(|e| Self::node_err("clipboard_read", &args.node_id, e))?;
+            let text = match content {
+                ClipboardContent::Text(t) => t,
+                ClipboardContent::Image { width, height, .. } => {
+                    format!("[image {}x{}]", width, height)
+                }
+            };
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        })
+        .await
     }
 
     #[tool(description = "Write text to the clipboard on a node")]
@@ -263,11 +339,17 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ClipboardWriteArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.registry
-            .clipboard_write(&args.node_id, ClipboardContent::Text(args.text))
-            .await
-            .map_err(|e| Self::node_err("clipboard_write", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        // Length only — clipboard payloads can be secrets.
+        let summary = format!("len={}", args.text.chars().count());
+        self.audit_call("clipboard_write", &node_id, summary, || async move {
+            self.registry
+                .clipboard_write(&args.node_id, ClipboardContent::Text(args.text))
+                .await
+                .map_err(|e| Self::node_err("clipboard_write", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     // ── Phase 3 shell tools ───────────────────────────────────────────────────
@@ -277,11 +359,20 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ShellRunArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let output = self.registry
-            .run_shell(&args.node_id, &args.command)
-            .await
-            .map_err(|e| Self::node_err("shell_run", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        let node_id = args.node_id.clone();
+        // The command IS logged — it's the highest-value audit signal
+        // (which shell command did the operator run on which box?).
+        // Operators who don't want commands logged should not point
+        // the audit log at a world-readable file.
+        let summary = format!("command={}", args.command);
+        self.audit_call("shell_run", &node_id, summary, || async move {
+            let output = self.registry
+                .run_shell(&args.node_id, &args.command)
+                .await
+                .map_err(|e| Self::node_err("shell_run", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text(output)]))
+        })
+        .await
     }
 
     #[tool(description = "Open an interactive PTY shell on a node. Returns a pty_id for subsequent writes/reads.")]
@@ -289,16 +380,26 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ShellOpenArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let pty_id = self.registry
-            .shell_open(
-                &args.node_id,
-                args.shell,
-                args.cols.unwrap_or(80),
-                args.rows.unwrap_or(24),
-            )
-            .await
-            .map_err(|e| Self::node_err("shell_open", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text(pty_id.to_string())]))
+        let node_id = args.node_id.clone();
+        let summary = format!(
+            "shell={:?},cols={},rows={}",
+            args.shell.as_deref().unwrap_or("$SHELL"),
+            args.cols.unwrap_or(80),
+            args.rows.unwrap_or(24)
+        );
+        self.audit_call("shell_open", &node_id, summary, || async move {
+            let pty_id = self.registry
+                .shell_open(
+                    &args.node_id,
+                    args.shell,
+                    args.cols.unwrap_or(80),
+                    args.rows.unwrap_or(24),
+                )
+                .await
+                .map_err(|e| Self::node_err("shell_open", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text(pty_id.to_string())]))
+        })
+        .await
     }
 
     #[tool(description = "Write text to an interactive PTY shell opened with shell_open")]
@@ -306,11 +407,18 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ShellWriteArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.registry
-            .shell_write(&args.node_id, args.pty_id, args.data.into_bytes())
-            .await
-            .map_err(|e| Self::node_err("shell_write", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        // Same secrecy reasoning as type_text and clipboard_write —
+        // log only the pty + length, never the bytes.
+        let summary = format!("pty={},len={}", args.pty_id, args.data.len());
+        self.audit_call("shell_write", &node_id, summary, || async move {
+            self.registry
+                .shell_write(&args.node_id, args.pty_id, args.data.into_bytes())
+                .await
+                .map_err(|e| Self::node_err("shell_write", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     #[tool(description = "Read buffered output from an interactive PTY shell. Drains the buffer.")]
@@ -318,12 +426,17 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ShellPtyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let raw = self.registry
-            .shell_read(&args.node_id, args.pty_id)
-            .await
-            .map_err(|e| Self::node_err("shell_read", &args.node_id, e))?;
-        let text = String::from_utf8_lossy(&raw).into_owned();
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let node_id = args.node_id.clone();
+        let summary = format!("pty={}", args.pty_id);
+        self.audit_call("shell_read", &node_id, summary, || async move {
+            let raw = self.registry
+                .shell_read(&args.node_id, args.pty_id)
+                .await
+                .map_err(|e| Self::node_err("shell_read", &args.node_id, e))?;
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            Ok(CallToolResult::success(vec![Content::text(text)]))
+        })
+        .await
     }
 
     #[tool(description = "Close an interactive PTY shell opened with shell_open")]
@@ -331,11 +444,16 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<ShellPtyArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.registry
-            .shell_close(&args.node_id, args.pty_id)
-            .await
-            .map_err(|e| Self::node_err("shell_close", &args.node_id, e))?;
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        let node_id = args.node_id.clone();
+        let summary = format!("pty={}", args.pty_id);
+        self.audit_call("shell_close", &node_id, summary, || async move {
+            self.registry
+                .shell_close(&args.node_id, args.pty_id)
+                .await
+                .map_err(|e| Self::node_err("shell_close", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        })
+        .await
     }
 
     // ── Phase 4 accessibility tool ────────────────────────────────────────────
@@ -345,17 +463,21 @@ impl KestrelMcp {
         &self,
         Parameters(args): Parameters<DescribeArgs>,
     ) -> Result<CallToolResult, McpError> {
-        // The proto carries a `display` field on DescribeReq for future use,
-        // but the agent's AX walker always describes the focused application
-        // regardless of display, so we always send 0.
-        let tree = self
-            .registry
-            .describe(&args.node_id, 0)
-            .await
-            .map_err(|e| Self::node_err("describe", &args.node_id, e))?;
-        let json = serde_json::to_string_pretty(&tree)
-            .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        let node_id = args.node_id.clone();
+        self.audit_call("describe", &node_id, String::new(), || async move {
+            // The proto carries a `display` field on DescribeReq for future use,
+            // but the agent's AX walker always describes the focused application
+            // regardless of display, so we always send 0.
+            let tree = self
+                .registry
+                .describe(&args.node_id, 0)
+                .await
+                .map_err(|e| Self::node_err("describe", &args.node_id, e))?;
+            let json = serde_json::to_string_pretty(&tree)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
+        .await
     }
 }
 
