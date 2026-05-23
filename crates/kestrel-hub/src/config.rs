@@ -126,24 +126,36 @@ pub fn remove_node(doc: &mut toml::Value, node_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Like `remove_node`, but distinguishes "node legitimately absent from a
-/// well-formed config" (`Ok(false)`) from "structural problem with the
-/// config" (`Err`). The dashboard's DELETE handler uses this to return 500
-/// for the structural case rather than misleading the operator with 404.
+/// Like `remove_node`, but distinguishes three cases:
+/// - `Ok(true)` — node was present and was removed.
+/// - `Ok(false)` — node was legitimately absent from a **well-formed**
+///   config (no `[[hub.nodes]]` entries at all, OR no entry matched).
+/// - `Err` — structural problem: missing `[hub]` section, OR `hub.nodes`
+///   exists but is not an array (e.g. `nodes = "foo"` instead of an array
+///   of tables). Pass 8 split this from the `Ok(false)` case after Pass 7
+///   noticed the original `let Some(...) = ... else` collapsed both.
+///
+/// The dashboard's DELETE handler uses this to return 500 on structural
+/// errors and 404 on legitimate absence.
 pub fn try_remove_node(doc: &mut toml::Value, node_id: &str) -> anyhow::Result<bool> {
-    let hub = hub_table_mut(doc)?; // Err only on missing/malformed [hub]
-    let Some(nodes) = hub.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
-        // No nodes array — the well-formed "empty fleet" state. Treat as
-        // "node not present" rather than an error.
-        return Ok(false);
-    };
-    let before = nodes.len();
-    nodes.retain(|n| {
-        n.as_table()
-            .and_then(|t| t.get("node_id"))
-            .and_then(|v| v.as_str()) != Some(node_id)
-    });
-    Ok(nodes.len() != before)
+    let hub = hub_table_mut(doc)?; // Err on missing/malformed [hub]
+    // Split get_mut and as_array_mut so we can tell "no `nodes` key" apart
+    // from "`nodes` key present but not an array".
+    match hub.get_mut("nodes") {
+        None => Ok(false), // well-formed empty-fleet
+        Some(v) => match v.as_array_mut() {
+            None => anyhow::bail!("hub.nodes is not an array"),
+            Some(nodes) => {
+                let before = nodes.len();
+                nodes.retain(|n| {
+                    n.as_table()
+                        .and_then(|t| t.get("node_id"))
+                        .and_then(|v| v.as_str()) != Some(node_id)
+                });
+                Ok(nodes.len() != before)
+            }
+        },
+    }
 }
 
 pub fn set_layout(doc: &mut toml::Value, node_id: &str, col: i64, row: i64) -> anyhow::Result<()> {
@@ -420,5 +432,60 @@ listen_dashboard = "0.0.0.0:7273"
         let nodes = loaded["hub"]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0]["node_id"].as_str().unwrap(), "alpha");
+    }
+
+    #[test]
+    fn try_remove_node_returns_ok_false_when_no_nodes_key() {
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        // Empty-fleet config — try_remove returns Ok(false), not Err.
+        assert_eq!(super::try_remove_node(&mut doc, "anything").unwrap(), false);
+    }
+
+    #[test]
+    fn try_remove_node_returns_true_when_present_false_when_not() {
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+[[hub.nodes]]
+node_id = "alpha"
+address = "127.0.0.1:7272"
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        assert_eq!(super::try_remove_node(&mut doc, "alpha").unwrap(), true);
+        // Removing again — no longer present → Ok(false), not Err.
+        assert_eq!(super::try_remove_node(&mut doc, "alpha").unwrap(), false);
+    }
+
+    #[test]
+    fn try_remove_node_errors_when_nodes_is_not_an_array() {
+        // Operator with broken config: `nodes = "foo"` instead of `[[hub.nodes]]`.
+        // Pass 8 fix: must return Err so the dashboard surfaces 500, not 404.
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+nodes = "this is not an array"
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        let err = super::try_remove_node(&mut doc, "x").unwrap_err();
+        assert!(
+            err.to_string().contains("not an array"),
+            "expected structural error mentioning 'not an array', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn try_remove_node_errors_when_hub_section_missing() {
+        let toml = "[other]\nfoo = 1\n";
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        let err = super::try_remove_node(&mut doc, "x").unwrap_err();
+        assert!(err.to_string().contains("[hub]"));
     }
 }

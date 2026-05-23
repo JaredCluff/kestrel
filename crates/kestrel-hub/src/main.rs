@@ -24,6 +24,21 @@ fn resolve_control_token() -> Option<String> {
     enrollment::load_control_token().ok()
 }
 
+/// Heuristic: did the error from `HubClient::add_node` / `remove_node` come
+/// from the hub responding with a non-success status, or from a transport
+/// failure (connection refused, timeout, TLS error)?
+///
+/// `HubClient` formats hub-responded errors as `"hub returned <code> ..."`
+/// (see `client.rs::add_node`/`remove_node`). Anything else is a transport
+/// failure. The CLI uses this to decide whether to fall back to local file
+/// mutation: a transport failure means "hub probably not running, write the
+/// file myself", but a hub-responded error means "the running hub knows
+/// about us and is telling us no" — surface it instead of silently writing
+/// to a file the hub will refuse to honor.
+fn is_hub_responded_error(e: &anyhow::Error) -> bool {
+    e.to_string().contains("hub returned ")
+}
+
 #[derive(Parser)]
 #[command(name = "kestrel-hub", about = "Kestrel fleet hub")]
 struct Cli {
@@ -251,8 +266,18 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_status) => {
                     println!("added '{}' at {} (live via {}).", node_id, parsed_addr, hub);
                 }
+                Err(e) if is_hub_responded_error(&e) => {
+                    // The hub responded but rejected the request (duplicate,
+                    // unauthorized, structural config error, etc.). Do NOT
+                    // fall back to file mutation — that would create a
+                    // running-hub-vs-on-disk-config inconsistency. Surface
+                    // the actual error.
+                    return Err(e.context(format!("hub at {} rejected add-node", hub)));
+                }
                 Err(e) => {
-                    // Hub unreachable — fall back to local file mutation.
+                    // Transport failure — hub probably not running. Fall
+                    // back to local file mutation so the change persists
+                    // for the next `kestrel-hub start`.
                     tracing::debug!("hub not reachable ({}), writing file directly", e);
                     let mut doc = kestrel_hub::config::load_doc(&config)?;
                     kestrel_hub::config::add_node(&mut doc, &node_id, parsed_addr)?;
@@ -280,7 +305,15 @@ async fn main() -> anyhow::Result<()> {
                 Ok(()) => {
                     println!("removed '{}' (live via {}).", node_id, hub);
                 }
+                Err(e) if is_hub_responded_error(&e) => {
+                    // Same logic as add-node: the hub responded with an
+                    // error (404 not-found, 500 structural config error,
+                    // 401 missing token). Surface it; do NOT silently
+                    // overwrite the file behind the running hub.
+                    return Err(e.context(format!("hub at {} rejected remove-node", hub)));
+                }
                 Err(e) => {
+                    // Transport failure — fall back to file mutation.
                     tracing::debug!("hub not reachable ({}), writing file directly", e);
                     let mut doc = kestrel_hub::config::load_doc(&config)?;
                     kestrel_hub::config::remove_node(&mut doc, &node_id)?;
