@@ -139,6 +139,132 @@ pub async fn events_handler(
     events_stream(registry)
 }
 
+// -------- Phase 11b OIDC dashboard endpoints -------------------------------
+//
+// GET  /oauth/<provider>/login     → 303 redirect to provider's
+//                                      authorize URL; stores PKCE + nonce
+//                                      keyed by csrf state
+// GET  /oauth/<provider>/callback  → exchanges the auth code + ID token,
+//                                      issues a kestrel_session cookie via
+//                                      Phase 11 session.rs, 303 to /
+
+#[derive(serde::Deserialize)]
+pub struct OauthCallbackQuery {
+    pub code: String,
+    pub state: String,
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub async fn oauth_login(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    axum::extract::Path(provider_name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(provider) = state
+        .oidc_providers
+        .iter()
+        .find(|p| p.name == provider_name)
+        .cloned()
+    else {
+        return (StatusCode::NOT_FOUND, format!("unknown provider '{}'", provider_name)).into_response();
+    };
+    let init = match crate::oidc::begin_login(&provider).await {
+        Ok(i) => i,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("oidc init: {}", e)).into_response();
+        }
+    };
+    // Store the PKCE verifier + nonce so the callback can verify.
+    {
+        let mut map = state.oidc_pending.lock().await;
+        map.insert(
+            init.csrf_state.clone(),
+            crate::dashboard::OidcPending {
+                provider: provider_name.clone(),
+                pkce_verifier: init.pkce_verifier,
+                nonce: init.nonce,
+                created_unix: now_unix_secs(),
+            },
+        );
+        // Best-effort GC: drop entries older than 10 minutes.
+        map.retain(|_, v| now_unix_secs().saturating_sub(v.created_unix) < 600);
+    }
+    axum::response::Redirect::to(&init.authorize_url).into_response()
+}
+
+pub async fn oauth_callback(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    axum::extract::Path(provider_name): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<OauthCallbackQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(provider) = state
+        .oidc_providers
+        .iter()
+        .find(|p| p.name == provider_name)
+        .cloned()
+    else {
+        return (StatusCode::NOT_FOUND, format!("unknown provider '{}'", provider_name)).into_response();
+    };
+    // Look up + remove the pending state.
+    let pending = {
+        let mut map = state.oidc_pending.lock().await;
+        map.remove(&q.state)
+    };
+    let Some(pending) = pending else {
+        return (StatusCode::BAD_REQUEST, "no pending OIDC flow for this state".to_string()).into_response();
+    };
+    // Verify the provider on the callback matches the one stored at
+    // begin_login — defense against a craftily-constructed callback
+    // URL using the wrong provider's path.
+    if pending.provider != provider_name {
+        return (StatusCode::BAD_REQUEST, "provider mismatch".to_string()).into_response();
+    }
+    let user_id = match crate::oidc::complete_login(
+        &provider,
+        q.code,
+        pending.pkce_verifier,
+        pending.nonce,
+    )
+    .await
+    {
+        Ok(u) => u,
+        Err(e) => {
+            return (StatusCode::UNAUTHORIZED, format!("oidc login failed: {}", e)).into_response();
+        }
+    };
+    // Optional: verify the user_id exists in policy.users before
+    // minting a session. Without policy, accept any OIDC-verified
+    // user (degenerate single-tenant mode).
+    if let Some(policy) = state.policy.as_ref() {
+        if !policy.users.iter().any(|u| u.user_id == user_id) {
+            return (
+                StatusCode::FORBIDDEN,
+                format!("OIDC user '{}' not in kestrel-policy.toml", user_id),
+            )
+                .into_response();
+        }
+    }
+    // Mint the session cookie via Phase 11 session.rs.
+    let (cookie, _expiry) = super::session::set_cookie_header(
+        &state.session_key,
+        super::session::DEFAULT_SESSION_TTL_SECS,
+    );
+    let mut response = axum::response::Redirect::to("/").into_response();
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&cookie) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, hv);
+    }
+    response
+}
+
 // -------- Phase 11b approval-queue endpoints -------------------------------
 //
 // Operators sign in to the dashboard, click "Approvals" in the
