@@ -61,16 +61,24 @@ pub fn current_focused_app() -> Option<FocusedApp> {
 }
 
 pub fn current_mouse_position() -> Option<MousePosition> {
-    // Deferred for v1. The portable mac call is CGEventCreate(nil) +
-    // CGEventGetLocation, but that requires a CFRetain/CFRelease
-    // dance and the right framework linkage; not worth the friction
-    // for a nice-to-have field when the AI rarely needs the cursor
-    // position outside of mouse_move (which already takes coords).
-    // Returning None degrades the field; everything else (focused
-    // app, displays, clipboard) still populates.
-    //
-    // Follow-up: use objc msg_send! to NSEvent's +mouseLocation,
-    // mirror the Cocoa-coords-to-display-coords conversion the
-    // mouse_move tool already does.
-    None
+    // NSEvent.mouseLocation returns the cursor in Cocoa global
+    // coordinates (origin at bottom-left of the main screen, Y
+    // increasing upward). For dashboard display we report the raw
+    // integer values — the AI can cross-reference against
+    // `displays[]` to know which monitor.
+    use objc::{class, msg_send, sel, sel_impl};
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct NSPoint {
+        x: f64,
+        y: f64,
+    }
+    unsafe {
+        let pt: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        Some(MousePosition {
+            x: pt.x as i32,
+            y: pt.y as i32,
+            display: 0,
+        })
+    }
 }

@@ -36,6 +36,19 @@ unsafe extern "C" {
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
 }
+
+/// Best-effort docker probe. Checks the standard daemon socket
+/// paths; doesn't catch remote DOCKER_HOST configs.
+fn docker_socket_present() -> bool {
+    let candidates = [
+        "/var/run/docker.sock",
+        "/run/docker.sock",
+        // macOS Docker Desktop puts its socket under the user dir.
+        // We don't try to resolve $HOME — Desktop also bridges
+        // /var/run, so the first check covers most users.
+    ];
+    candidates.iter().any(|p| std::path::Path::new(p).exists())
+}
 use crate::config::AgentConfig;
 
 /// Cap WebSocket message size to bound memory per frame. Screenshots are the
@@ -176,11 +189,12 @@ async fn handle_conn(
         // `sudo -n true` which prompts on some configs. Conservative:
         // report false unless we're literally root.
         has_sudo: is_running_as_root(),
-        // Docker: probe by trying `docker version --format '{{.Server.Version}}'`
-        // would block on the network. Conservative v1: false. A
-        // follow-up can probe the docker socket directly without
-        // running a subprocess.
-        has_docker: false,
+        // Docker: probe by checking the canonical socket paths
+        // without running a subprocess. Catches the common case of
+        // a local docker daemon running on UNIX; doesn't catch
+        // remote DOCKER_HOST configs (those would need a real
+        // dial-and-API-version call).
+        has_docker: docker_socket_present(),
     };
     tx.send(Message::Binary(encode(&KestrelMessage {
         stream_id: 0, kind: MsgKind::Event,
