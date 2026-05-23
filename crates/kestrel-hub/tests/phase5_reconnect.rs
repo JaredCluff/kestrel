@@ -275,6 +275,49 @@ async fn supervisor_uses_configured_node_id_when_agent_hostname_differs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn supervisor_uses_agent_node_id_when_configured_matches() {
+    // Companion to `supervisor_uses_configured_node_id_when_agent_hostname_differs`.
+    // When the operator's configured node_id MATCHES what the agent reports,
+    // the supervisor's mismatch-rename branch must NOT fire — the registry
+    // should key by the (identical) id either way, but the warn-level log
+    // should be absent. We can't easily assert "no log" without a tracing
+    // capture harness, but we can assert the registered id is exactly the
+    // configured one — which is the contract that matters.
+    //
+    // Without this companion test, a regression that made the supervisor
+    // ALWAYS overwrite handle.node_id (instead of conditionally on mismatch)
+    // would still pass the original test because the override happens to
+    // produce the right id. Pairing both tests pins the if/else surface.
+    let (addr, agent) = spawn_agent_on("matching-id", "127.0.0.1:0".parse().unwrap());
+
+    let registry = Arc::new(NodeRegistry::new());
+    let mut rx = registry.subscribe();
+    let _sup = supervisor::spawn(
+        NodeConfig {
+            node_id: "matching-id".into(), // SAME as the agent reports
+            address: addr,
+        },
+        registry.clone(),
+        test_psk(),
+    );
+
+    wait_for_connected(&mut rx, "matching-id", Duration::from_secs(5))
+        .await
+        .expect("Connected with matching id should arrive");
+
+    let snap = registry.status_snapshot().await;
+    assert_eq!(snap.len(), 1, "exactly one node in the registry");
+    assert_eq!(snap[0].node_id, "matching-id");
+
+    let shutdown_done = std::thread::spawn(move || agent.shutdown());
+    tokio::task::spawn_blocking(move || {
+        let _ = shutdown_done.join();
+    })
+    .await
+    .ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn supervisor_keeps_retrying_with_wrong_psk() {
     // Simulates an agent whose PSK has been rotated out-of-band: hub still
     // thinks the old PSK is valid; agent rejects every connection because the

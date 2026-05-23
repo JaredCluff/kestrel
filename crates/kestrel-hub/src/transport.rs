@@ -525,61 +525,69 @@ mod tests {
         );
     }
 
-    #[test]
-    fn append_with_cap_two_overflows_no_drain_does_not_double_mark() {
-        // If the operator doesn't drain between two overflows on the same
-        // buffer, the dedup at `let already_truncated = buf.ends_with(MARKER)`
-        // should prevent two markers from accumulating back-to-back. The
-        // first overflow leaves the buffer ending with the marker; a second
-        // overflow before any non-marker bytes arrive must NOT append a
-        // second marker.
-        let mut buf = Vec::new();
-        append_with_cap(&mut buf, &vec![b'A'; SHELL_BUFFER_CAP + 100]);
-        assert!(buf.ends_with(SHELL_TRUNCATED_MARKER));
-        let after_first = buf.len();
-
-        // Immediately overflow again, no drain. The buffer's tail still has
-        // the marker, so `already_truncated` should be true and we should
-        // not stack a second marker on the end.
-        append_with_cap(&mut buf, &vec![b'B'; SHELL_BUFFER_CAP / 2]);
-        // After the drain, the buffer ends with the new 'B' bytes (the marker
-        // was pushed mid-buffer by drain semantics). We can't assert
-        // ends_with(MARKER) here — what we CAN assert is that we don't grow
-        // unboundedly: the buffer is still bounded.
-        assert!(
-            buf.len() <= SHELL_BUFFER_CAP + SHELL_TRUNCATED_MARKER.len(),
-            "after second overflow, buffer must stay bounded; got {} (was {})",
-            buf.len(),
-            after_first
-        );
-        // The marker remains somewhere in the buffer — drained from the
-        // front, not stacked on the end.
-        assert!(
-            buf.windows(SHELL_TRUNCATED_MARKER.len())
-                .any(|w| w == SHELL_TRUNCATED_MARKER),
-            "marker should still be present (somewhere) after second overflow"
-        );
+    /// Helper: count non-overlapping occurrences of `needle` in `hay`. Used
+    /// in the marker-stacking tests so a regression that appends two markers
+    /// back-to-back is visible (vs. just "at least one is present").
+    fn count_markers(hay: &[u8]) -> usize {
+        if SHELL_TRUNCATED_MARKER.is_empty() {
+            return 0;
+        }
+        let mut n = 0;
+        let mut i = 0;
+        while i + SHELL_TRUNCATED_MARKER.len() <= hay.len() {
+            if &hay[i..i + SHELL_TRUNCATED_MARKER.len()] == SHELL_TRUNCATED_MARKER {
+                n += 1;
+                i += SHELL_TRUNCATED_MARKER.len();
+            } else {
+                i += 1;
+            }
+        }
+        n
     }
 
     #[test]
-    fn append_with_cap_data_containing_marker_bytes_is_safe() {
-        // A pathological case: the shell writes bytes that include the
-        // truncation marker text. The dedup logic must not be confused into
-        // suppressing legitimate truncation marks just because data happened
-        // to end with the marker bytes.
+    fn append_with_cap_two_overflows_no_drain_holds_exactly_one_marker() {
+        // If the operator doesn't drain between two overflows on the same
+        // buffer, the dedup at `let already_truncated = buf.ends_with(MARKER)`
+        // should prevent a SECOND marker from being appended. The first
+        // overflow leaves the buffer ending with the marker; the second
+        // overflow sees `already_truncated == true` and skips the append. The
+        // single marker may end up mid-buffer after drain, but there should
+        // only ever be one — not two stacked.
         let mut buf = Vec::new();
-        // Place a single marker-sized payload, well under the cap.
+        append_with_cap(&mut buf, &vec![b'A'; SHELL_BUFFER_CAP + 100]);
+        assert_eq!(count_markers(&buf), 1, "first overflow appends one marker");
+        assert!(buf.ends_with(SHELL_TRUNCATED_MARKER));
+
+        // Immediately overflow again, no drain. With dedup working, the
+        // marker count must STAY AT ONE — not grow to two. This is the
+        // specific regression the test guards against.
+        append_with_cap(&mut buf, &vec![b'B'; SHELL_BUFFER_CAP / 2]);
+        assert_eq!(
+            count_markers(&buf),
+            1,
+            "second overflow without drain must NOT double-mark"
+        );
+        assert!(buf.len() <= SHELL_BUFFER_CAP + SHELL_TRUNCATED_MARKER.len());
+    }
+
+    #[test]
+    fn append_with_cap_data_containing_marker_bytes_stays_bounded() {
+        // Pathological case: the shell writes bytes that happen to equal the
+        // truncation marker. The dedup logic at `ends_with(MARKER)` will
+        // misfire — it treats real shell data as if it were a prior
+        // truncation, so a subsequent overflow won't append a fresh marker.
+        // That's a documented loss of marker fidelity, NOT a memory-safety
+        // problem: the cap is enforced unconditionally. This test pins the
+        // bounded-memory contract (the property that actually matters) and
+        // explicitly does NOT assert on marker count, since marker semantics
+        // are intentionally degraded for this input.
+        let mut buf = Vec::new();
         let payload = SHELL_TRUNCATED_MARKER.to_vec();
         append_with_cap(&mut buf, &payload);
-        // Buf now ends with the marker — but it was real data, not a
-        // truncation. No truncation has happened yet.
         assert_eq!(buf.len(), SHELL_TRUNCATED_MARKER.len());
-        // Now overflow. The dedup sees `ends_with(MARKER)` and treats this
-        // as "already truncated, no need to append another marker". This is
-        // intentional — the only downside is the operator might not see a
-        // marker for THIS truncation, but they did see the marker-shaped
-        // bytes earlier. The buffer stays bounded either way, which is what
-        // we ultimately care about (no OOM-DoS vector).
+        // Overflow with arbitrary bytes — buffer must stay capped regardless
+        // of whether dedup decides to add a marker.
         append_with_cap(&mut buf, &vec![b'X'; SHELL_BUFFER_CAP + 10]);
         assert!(
             buf.len() <= SHELL_BUFFER_CAP + SHELL_TRUNCATED_MARKER.len(),
