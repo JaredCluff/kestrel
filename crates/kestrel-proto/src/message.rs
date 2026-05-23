@@ -61,6 +61,26 @@ pub enum Payload {
     /// for "give me a node with a GPU and a connected display" via
     /// the `fleet_find` MCP tool.
     Capabilities { caps: Capabilities },
+    /// Phase 12b — List the plugins available on this node. Variant 27.
+    /// Hub sends; agent replies with PluginList.
+    PluginListReq,
+    PluginListResp { plugins: Vec<PluginInfoWire> },
+    /// Phase 12b — Invoke a plugin tool. Variant 29.
+    /// args_json carries the tool args as a JSON string so the proto
+    /// stays agnostic about plugin schemas.
+    PluginCallReq { plugin: String, tool: String, args_json: String },
+    PluginCallResp { result_json: String },
+}
+
+/// Wire-side mirror of agent's PluginInfo. Lives in proto so both
+/// sides can serialize/deserialize without crossing the kestrel-agent
+/// dependency boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInfoWire {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub tools: Vec<String>,
 }
 
 /// What an agent can do — coarse boolean flags + the OS name. The

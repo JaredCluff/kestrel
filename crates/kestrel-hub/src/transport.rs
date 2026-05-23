@@ -321,6 +321,33 @@ impl NodeHandle {
         }
     }
 
+    // ── Phase 12b plugin proxy ────────────────────────────────────────────────
+
+    pub async fn plugin_list(&self) -> anyhow::Result<Vec<kestrel_proto::PluginInfoWire>> {
+        let reply = self.request(Payload::PluginListReq).await?;
+        match reply.payload {
+            Payload::PluginListResp { plugins } => Ok(plugins),
+            Payload::Error { message, .. } => anyhow::bail!("plugin_list: {}", message),
+            _ => anyhow::bail!("expected PluginListResp"),
+        }
+    }
+
+    pub async fn plugin_invoke(
+        &self,
+        plugin: String,
+        tool: String,
+        args_json: String,
+    ) -> anyhow::Result<String> {
+        let reply = self
+            .request(Payload::PluginCallReq { plugin, tool, args_json })
+            .await?;
+        match reply.payload {
+            Payload::PluginCallResp { result_json } => Ok(result_json),
+            Payload::Error { message, .. } => anyhow::bail!("plugin_invoke: {}", message),
+            _ => anyhow::bail!("expected PluginCallResp"),
+        }
+    }
+
     // ── Phase 3 shell ─────────────────────────────────────────────────────────
 
     pub async fn spawn_shell(&self, shell: Option<String>, cols: u16, rows: u16) -> anyhow::Result<u32> {

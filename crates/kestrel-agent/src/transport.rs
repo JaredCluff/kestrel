@@ -196,6 +196,12 @@ async fn handle_conn(
         tokio::sync::mpsc::channel::<KestrelMessage>(shell::SHELL_EVENT_CAPACITY);
     let shell_mgr = ShellManager::new(event_tx.clone());
 
+    // Phase 12b: discover plugins at connection time. Spawning at
+    // each (re)connect is intentional — plugins crash, get installed
+    // /uninstalled, and we want a fresh list per session. Cheap if
+    // there are no plugins (returns empty map immediately).
+    let plugins = crate::capabilities::plugins::discover_and_spawn().await;
+
     // World-state observer: every ~2s, sample local state and push a
     // WorldUpdate event if anything changed. JoinHandle is dropped at
     // function-end (when the connection terminates) which aborts the
@@ -330,6 +336,48 @@ async fn handle_conn(
                     }
                     Payload::ShellClose { pty_id } => {
                         shell_mgr.close(pty_id);
+                    }
+                    Payload::PluginListReq => {
+                        let list: Vec<kestrel_proto::PluginInfoWire> = plugins
+                            .values()
+                            .map(|p| kestrel_proto::PluginInfoWire {
+                                name: p.info.name.clone(),
+                                version: p.info.version.clone(),
+                                description: p.info.description.clone(),
+                                tools: p.info.tools.clone(),
+                            })
+                            .collect();
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response,
+                            payload: Payload::PluginListResp { plugins: list },
+                        })?)).await?;
+                    }
+                    Payload::PluginCallReq { plugin, tool, args_json } => {
+                        let response = match plugins.get(&plugin) {
+                            None => Payload::Error {
+                                code: kestrel_proto::ErrorCode::NotFound,
+                                message: format!("plugin '{}' not loaded", plugin),
+                            },
+                            Some(handle) => {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&args_json)
+                                        .unwrap_or(serde_json::Value::Null);
+                                match handle.call(&tool, args).await {
+                                    Ok(v) => Payload::PluginCallResp {
+                                        result_json: serde_json::to_string(&v)
+                                            .unwrap_or_else(|_| "null".into()),
+                                    },
+                                    Err(e) => Payload::Error {
+                                        code: kestrel_proto::ErrorCode::Internal,
+                                        message: format!("plugin call failed: {}", e),
+                                    },
+                                }
+                            }
+                        };
+                        tx.send(Message::Binary(encode(&KestrelMessage {
+                            stream_id, kind: MsgKind::Response,
+                            payload: response,
+                        })?)).await?;
                     }
                     _ => {}
                 }

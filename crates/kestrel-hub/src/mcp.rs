@@ -726,6 +726,50 @@ impl KestrelMcp {
         })
         .await
     }
+
+    // ── Phase 12b plugin invocation ───────────────────────────────────────
+
+    #[tool(description = "List the plugins installed on a node and the tools each one exposes. Plugins are vendor-extensible executables in $HOME/.kestrel/plugins/ on the agent's machine that speak JSON-RPC over stdio. Returns a JSON array of {name, version, description, tools:[]}.")]
+    async fn plugin_list(
+        &self,
+        Parameters(args): Parameters<NodeIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let node_id = args.node_id.clone();
+        self.audit_call("plugin_list", &node_id, String::new(), || async move {
+            let plugins = self
+                .registry
+                .plugin_list(&args.node_id)
+                .await
+                .map_err(|e| Self::node_err("plugin_list", &args.node_id, e))?;
+            let json = serde_json::to_string_pretty(&plugins)
+                .unwrap_or_else(|e| format!("[\"error: {}\"]", e));
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
+        .await
+    }
+
+    #[tool(description = "Invoke a tool on a node's plugin. `args_json` is a JSON string of plugin-specific args; the plugin defines its own schema. Returns the plugin's response as a JSON string the caller parses according to plugin docs. Use `plugin_list` first to discover what's available.")]
+    async fn plugin_invoke(
+        &self,
+        Parameters(args): Parameters<PluginInvokeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let node_id = args.node_id.clone();
+        let summary = format!("plugin={},tool={}", args.plugin, args.tool);
+        self.audit_call("plugin_invoke", &node_id, summary, || async move {
+            let result = self
+                .registry
+                .plugin_invoke(
+                    &args.node_id,
+                    args.plugin.clone(),
+                    args.tool.clone(),
+                    args.args_json,
+                )
+                .await
+                .map_err(|e| Self::node_err("plugin_invoke", &args.node_id, e))?;
+            Ok(CallToolResult::success(vec![Content::text(result)]))
+        })
+        .await
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -751,6 +795,16 @@ pub struct SandboxSpawnArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SandboxIdArgs {
     pub sandbox_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PluginInvokeArgs {
+    pub node_id: String,
+    pub plugin: String,
+    pub tool: String,
+    /// Args as a JSON string. Plugins define their own arg schema;
+    /// the hub doesn't parse, just forwards.
+    pub args_json: String,
 }
 
 #[tool_handler]
