@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod events;
 pub mod kvm;
 pub mod mcp;
+pub mod oidc;
 pub mod policy;
 pub mod router;
 pub mod sandbox;
