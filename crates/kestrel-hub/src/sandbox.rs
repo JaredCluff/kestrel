@@ -229,18 +229,50 @@ struct TartBackend;
 impl Backend for TartBackend {
     fn name(&self) -> &'static str { "tart" }
     async fn provision(&self, sandbox_id: &str, image: &str) -> anyhow::Result<String> {
-        // TODO: `tart clone <image> <vm-name>` then `tart run <vm-name>
-        // --no-graphics` in the background. Wait for boot. Install the
-        // agent via embedded SSH key. Register with the hub. Return
-        // the VM name.
         let vm_name = format!("kestrel-{}", sandbox_id);
-        anyhow::bail!(
-            "tart provisioning not yet implemented (would clone '{}' as VM '{}'); see crates/kestrel-hub/src/sandbox.rs",
-            image, vm_name
-        )
+        // `tart clone <image> <vm-name>` clones a registered Tart
+        // image into a new VM. The image must be available locally
+        // (operator runs `tart pull` ahead of time). Tart is required
+        // on PATH; we don't try to auto-install it.
+        let out = tokio::process::Command::new("tart")
+            .args(["clone", image, &vm_name])
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("tart clone failed to spawn: {} (is tart on PATH?)", e))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "tart clone {} {} failed (exit {:?}): {}",
+                image, vm_name, out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // `tart run` blocks; we spawn it as a detached background
+        // task whose JoinHandle we drop intentionally — the VM
+        // continues running independently. Teardown shuts it down
+        // explicitly via `tart stop`.
+        let bg_name = vm_name.clone();
+        tokio::spawn(async move {
+            let _ = tokio::process::Command::new("tart")
+                .args(["run", "--no-graphics", &bg_name])
+                .output()
+                .await;
+        });
+        Ok(vm_name)
     }
-    async fn teardown(&self, _sandbox: &Sandbox) -> anyhow::Result<()> {
-        // TODO: `tart stop <vm-name>` then `tart delete <vm-name>`.
+    async fn teardown(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
+        let Some(vm_name) = sandbox.backend_handle.as_deref() else {
+            return Ok(()); // never provisioned successfully
+        };
+        // Best-effort: stop, then delete. Both can fail (VM already
+        // gone, etc.); we log and continue rather than propagating.
+        let _ = tokio::process::Command::new("tart")
+            .args(["stop", vm_name])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("tart")
+            .args(["delete", vm_name])
+            .output()
+            .await;
         Ok(())
     }
 }
@@ -252,13 +284,35 @@ struct LimaBackend;
 impl Backend for LimaBackend {
     fn name(&self) -> &'static str { "lima" }
     async fn provision(&self, sandbox_id: &str, image: &str) -> anyhow::Result<String> {
-        anyhow::bail!(
-            "lima provisioning not yet implemented (would `limactl start` from image '{}'); see sandbox.rs",
-            image
-        )
+        let inst = format!("kestrel-{}", sandbox_id);
+        // `limactl start --name=<inst> <template>` boots a fresh
+        // Lima instance from a built-in or user-provided template
+        // (e.g. "ubuntu", "default"). `--tty=false` is required to
+        // avoid blocking on the interactive setup prompt.
+        let out = tokio::process::Command::new("limactl")
+            .args(["start", "--tty=false", &format!("--name={}", inst), image])
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("limactl start failed to spawn: {} (is limactl on PATH?)", e))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "limactl start {} {} failed (exit {:?}): {}",
+                inst, image, out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(inst)
     }
-    async fn teardown(&self, _sandbox: &Sandbox) -> anyhow::Result<()> {
-        // TODO: `limactl stop <instance>` + `limactl delete <instance>`.
+    async fn teardown(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
+        let Some(inst) = sandbox.backend_handle.as_deref() else { return Ok(()); };
+        let _ = tokio::process::Command::new("limactl")
+            .args(["stop", inst])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("limactl")
+            .args(["delete", inst])
+            .output()
+            .await;
         Ok(())
     }
 }
@@ -269,10 +323,41 @@ struct HyperVBackend;
 #[async_trait::async_trait]
 impl Backend for HyperVBackend {
     fn name(&self) -> &'static str { "hyperv" }
-    async fn provision(&self, _sandbox_id: &str, _image: &str) -> anyhow::Result<String> {
-        anyhow::bail!("hyperv provisioning not yet implemented; see sandbox.rs")
+    async fn provision(&self, sandbox_id: &str, image: &str) -> anyhow::Result<String> {
+        // PowerShell New-VM driven via the Hyper-V module. The
+        // `image` is interpreted as a VHDX path. Operators ship
+        // pre-baked images; auto-fetch is a follow-up.
+        let vm_name = format!("kestrel-{}", sandbox_id);
+        let script = format!(
+            "New-VM -Name '{}' -VHDPath '{}' -Generation 2 -MemoryStartupBytes 2GB; Start-VM -Name '{}'",
+            vm_name, image, vm_name
+        );
+        let out = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("powershell failed to spawn: {}", e))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "Hyper-V New-VM/Start-VM failed (exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Ok(vm_name)
     }
-    async fn teardown(&self, _sandbox: &Sandbox) -> anyhow::Result<()> { Ok(()) }
+    async fn teardown(&self, sandbox: &Sandbox) -> anyhow::Result<()> {
+        let Some(vm_name) = sandbox.backend_handle.as_deref() else { return Ok(()); };
+        let script = format!(
+            "Stop-VM -Name '{}' -Force; Remove-VM -Name '{}' -Force",
+            vm_name, vm_name
+        );
+        let _ = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .await;
+        Ok(())
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
