@@ -99,6 +99,15 @@ pub struct DescribeArgs {
     pub node_id: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorldDiffArgs {
+    pub node_id: String,
+    /// Return the world state IFF it was observed strictly after
+    /// `since_unix_secs`. Unix seconds since epoch. Pass 0 to get the
+    /// current state regardless of when it was observed.
+    pub since_unix_secs: u64,
+}
+
 // ── Server ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -479,6 +488,51 @@ impl KestrelMcp {
         })
         .await
     }
+
+    // ── Phase 6 world-state tools ─────────────────────────────────────────
+
+    #[tool(description = "Get a structured snapshot of what's currently happening on a node: focused application name/pid, mouse position, displays, clipboard metadata (kind + length + 16-hex SHA-256 fingerprint, NEVER the content), open shell session metadata, and the unix timestamp the agent observed at. Cheaper than `screenshot` or `describe` for the common case of \"check what's going on without re-imaging.\" Returns null when the hub has no observation yet (fresh connect; agent's first WorldObserver tick hasn't completed).")]
+    async fn world_state(
+        &self,
+        Parameters(args): Parameters<NodeIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let node_id = args.node_id.clone();
+        self.audit_call("world_state", &node_id, String::new(), || async move {
+            match self.registry.world_state_for(&args.node_id).await {
+                Some(state) => {
+                    let json = serde_json::to_string_pretty(&state)
+                        .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                }
+                None => Ok(CallToolResult::success(vec![Content::text("null")])),
+            }
+        })
+        .await
+    }
+
+    #[tool(description = "Get the world-state snapshot for a node IFF it was observed strictly after `since_unix_secs`. Returns the text literal \"null\" when nothing has changed since that point. Lets agents poll cheaply for \"anything new?\" between turns. Pass `since_unix_secs=0` to always get the current state.")]
+    async fn world_diff_since(
+        &self,
+        Parameters(args): Parameters<WorldDiffArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let node_id = args.node_id.clone();
+        let summary = format!("since={}", args.since_unix_secs);
+        self.audit_call("world_diff_since", &node_id, summary, || async move {
+            match self
+                .registry
+                .world_diff_since(&args.node_id, args.since_unix_secs)
+                .await
+            {
+                Some(state) => {
+                    let json = serde_json::to_string_pretty(&state)
+                        .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                }
+                None => Ok(CallToolResult::success(vec![Content::text("null")])),
+            }
+        })
+        .await
+    }
 }
 
 #[tool_handler]
@@ -524,5 +578,68 @@ mod tests {
         let mcp_err = KestrelMcp::node_err("screenshot", "macstudio", e);
         let msg = format!("{:?}", mcp_err);
         assert!(!msg.contains("hint:"), "did not expect hint for unrelated error, got: {}", msg);
+    }
+
+    // ── Phase 6 world-state MCP tool tests ────────────────────────────────
+
+    fn seed_world(reg: &NodeRegistry, node_id: &str, app: &str, ts: u64) {
+        use kestrel_proto::{FocusedApp, WorldState};
+        // Direct construction; observe_world_update is the public API
+        // but it's async + broadcasts events the test doesn't need.
+        // The smoke property we want is that the tool calls
+        // world_state_for, which reads from the cache regardless of
+        // how it got there. Using the public API would be 1:1
+        // equivalent here.
+        let state = WorldState {
+            focused_app: Some(FocusedApp {
+                name: app.into(),
+                pid: 1,
+                window_title: None,
+            }),
+            mouse: None,
+            displays: vec![],
+            clipboard: None,
+            shells: vec![],
+            last_observed_unix: ts,
+        };
+        // Block on the async API from this sync helper via
+        // `tokio::runtime::Handle::current()` so callers inside
+        // #[tokio::test] just call `seed_world` synchronously.
+        let r = reg.clone();
+        let n = node_id.to_string();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                r.observe_world_update(&n, state).await;
+            });
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn world_state_for_known_node_returns_json() {
+        let registry = Arc::new(NodeRegistry::new());
+        seed_world(&registry, "alpha", "Safari", 1700000000);
+        // Read back via the registry (the public API the tool uses).
+        let state = registry.world_state_for("alpha").await.unwrap();
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"name\":\"Safari\""));
+        assert!(json.contains("\"last_observed_unix\":1700000000"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn world_state_for_unknown_node_is_none() {
+        let registry = Arc::new(NodeRegistry::new());
+        assert!(registry.world_state_for("ghost").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn world_diff_since_strict_after_only() {
+        let registry = Arc::new(NodeRegistry::new());
+        seed_world(&registry, "alpha", "Safari", 100);
+        // since == last_observed → returns None (strict >).
+        assert!(registry.world_diff_since("alpha", 100).await.is_none());
+        // since < last_observed → returns the state.
+        assert!(registry.world_diff_since("alpha", 50).await.is_some());
+        // since > last_observed → returns None.
+        assert!(registry.world_diff_since("alpha", 200).await.is_none());
     }
 }
