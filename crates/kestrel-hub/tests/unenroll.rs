@@ -5,9 +5,14 @@
 // (2) with --yes and --keep-config, the TOML stays
 // (3) with --yes alone, the TOML is deleted
 //
-// Keyring deletion is hard to test cross-platform — we only assert the
-// config-file path; the keyring path is exercised in the bin's enrollment
-// unit tests and at runtime.
+// IMPORTANT: --yes invokes `enrollment::clear_hub_keyring()`, which deletes
+// the `kestrel`/`psk` and `kestrel`/`control_token` entries from the
+// developer's REAL system keyring. Tests that exercise --yes are gated
+// behind `#[ignore]` so `cargo test` against a developer machine with a
+// real Kestrel install doesn't clobber the operator's setup. Opt in with
+// `cargo test --include-ignored` when you specifically want to verify the
+// --yes paths. The dry-run and missing-config paths are kept un-ignored
+// since they touch neither the keyring nor the file.
 use std::process::Command;
 
 fn bin() -> &'static str {
@@ -46,6 +51,7 @@ fn unenroll_dry_run_does_not_delete_config() {
 }
 
 #[test]
+#[ignore = "touches real OS keyring; run with --include-ignored to verify"]
 fn unenroll_yes_deletes_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = starter_toml(dir.path());
@@ -60,6 +66,7 @@ fn unenroll_yes_deletes_config_file() {
 }
 
 #[test]
+#[ignore = "touches real OS keyring; run with --include-ignored to verify"]
 fn unenroll_yes_with_missing_config_is_a_no_op_not_an_error() {
     // The unenroll command's file-delete step must handle "file already
     // gone" as a no-op rather than an error. Reproduces the missing-file
@@ -102,6 +109,7 @@ fn unenroll_dry_run_with_missing_config_says_so() {
 }
 
 #[test]
+#[ignore = "touches real OS keyring; run with --include-ignored to verify"]
 fn unenroll_yes_keep_config_preserves_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = starter_toml(dir.path());

@@ -126,6 +126,26 @@ pub fn remove_node(doc: &mut toml::Value, node_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Like `remove_node`, but distinguishes "node legitimately absent from a
+/// well-formed config" (`Ok(false)`) from "structural problem with the
+/// config" (`Err`). The dashboard's DELETE handler uses this to return 500
+/// for the structural case rather than misleading the operator with 404.
+pub fn try_remove_node(doc: &mut toml::Value, node_id: &str) -> anyhow::Result<bool> {
+    let hub = hub_table_mut(doc)?; // Err only on missing/malformed [hub]
+    let Some(nodes) = hub.get_mut("nodes").and_then(|v| v.as_array_mut()) else {
+        // No nodes array — the well-formed "empty fleet" state. Treat as
+        // "node not present" rather than an error.
+        return Ok(false);
+    };
+    let before = nodes.len();
+    nodes.retain(|n| {
+        n.as_table()
+            .and_then(|t| t.get("node_id"))
+            .and_then(|v| v.as_str()) != Some(node_id)
+    });
+    Ok(nodes.len() != before)
+}
+
 pub fn set_layout(doc: &mut toml::Value, node_id: &str, col: i64, row: i64) -> anyhow::Result<()> {
     let hub = hub_table_mut(doc)?;
     let layout = hub

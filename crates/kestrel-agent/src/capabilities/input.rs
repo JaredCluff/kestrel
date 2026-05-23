@@ -82,20 +82,35 @@ pub async fn inject_key_event(
         let is_shift = matches!(key, KeyCode::Shift);
         let is_alt   = matches!(key, KeyCode::Alt);
         let is_meta  = matches!(key, KeyCode::Meta);
-        if matches!(action, PressRelease::Press | PressRelease::Click) {
-            if mods.ctrl  && !is_ctrl  { enigo.key(Key::Control, Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.shift && !is_shift { enigo.key(Key::Shift,   Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.alt   && !is_alt   { enigo.key(Key::Alt,     Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.meta  && !is_meta  { enigo.key(Key::Meta,    Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-        }
-        enigo.key(to_enigo_key(&key), dir).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        // Press modifiers + the main key inside a closure so we capture any
+        // mid-sequence failure but ALWAYS run modifier releases below.
+        // Without this guard, a `?` early-exit between the modifier press
+        // and the release would leave the user's machine with the modifier
+        // physically latched down until the next manual modifier press.
+        let press_result: anyhow::Result<()> = (|| {
+            if matches!(action, PressRelease::Press | PressRelease::Click) {
+                if mods.ctrl  && !is_ctrl  { enigo.key(Key::Control, Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+                if mods.shift && !is_shift { enigo.key(Key::Shift,   Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+                if mods.alt   && !is_alt   { enigo.key(Key::Alt,     Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+                if mods.meta  && !is_meta  { enigo.key(Key::Meta,    Direction::Press).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            }
+            enigo.key(to_enigo_key(&key), dir).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            Ok(())
+        })();
+
+        // Always attempt releases when action would naturally require them,
+        // regardless of whether the press path succeeded. Release failures
+        // are silenced — if a release errors there is little to do, and the
+        // caller's primary error is whatever broke the press.
         if matches!(action, PressRelease::Release | PressRelease::Click) {
-            if mods.meta  && !is_meta  { enigo.key(Key::Meta,    Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.alt   && !is_alt   { enigo.key(Key::Alt,     Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.shift && !is_shift { enigo.key(Key::Shift,   Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
-            if mods.ctrl  && !is_ctrl  { enigo.key(Key::Control, Direction::Release).map_err(|e| anyhow::anyhow!("{e:?}"))?; }
+            if mods.meta  && !is_meta  { let _ = enigo.key(Key::Meta,    Direction::Release); }
+            if mods.alt   && !is_alt   { let _ = enigo.key(Key::Alt,     Direction::Release); }
+            if mods.shift && !is_shift { let _ = enigo.key(Key::Shift,   Direction::Release); }
+            if mods.ctrl  && !is_ctrl  { let _ = enigo.key(Key::Control, Direction::Release); }
         }
-        Ok(())
+
+        press_result
     }).await.context("spawn_blocking panic")??;
     Ok(())
 }

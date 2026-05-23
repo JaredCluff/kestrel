@@ -101,19 +101,32 @@ async fn main() -> anyhow::Result<()> {
                 println!("Re-run with --yes to perform these actions.");
                 return Ok(());
             }
-            // Clear PSK best-effort.
+            // Track whether any destructive step failed so we exit non-zero
+            // — same rationale as the hub-side unenroll: scripted decommission
+            // pipelines need a real exit code, not "always 0 with FAILED in
+            // stdout".
+            let mut any_failed = false;
             match keyring::Entry::new("kestrel", "psk").and_then(|e| e.delete_password()) {
                 Ok(()) => println!("psk              cleared"),
                 Err(keyring::Error::NoEntry) => println!("psk              (not found)"),
-                Err(e) => println!("psk              FAILED: {}", e),
+                Err(e) => {
+                    println!("psk              FAILED: {}", e);
+                    any_failed = true;
+                }
             }
             if will_delete_config {
                 match std::fs::remove_file(&config) {
                     Ok(()) => println!("{:<16} deleted", config),
-                    Err(e) => println!("{:<16} FAILED: {}", config, e),
+                    Err(e) => {
+                        println!("{:<16} FAILED: {}", config, e);
+                        any_failed = true;
+                    }
                 }
             } else if keep_config {
                 println!("{:<16} kept (--keep-config)", config);
+            }
+            if any_failed {
+                anyhow::bail!("one or more unenroll steps failed; system is in a partial state");
             }
         }
     }
