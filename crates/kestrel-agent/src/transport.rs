@@ -125,6 +125,10 @@ async fn handle_conn(
         .into_iter()
         .map(|(i, w, h)| DisplayInfo { id: i as u8, width: w, height: h })
         .collect();
+    // Capture the displays list before it's consumed by the SystemInfo
+    // payload so the WorldObserver can include it in every WorldState
+    // snapshot it emits.
+    let world_displays = displays.clone();
     tx.send(Message::Binary(encode(&KestrelMessage {
         stream_id: 0, kind: MsgKind::Event,
         payload: Payload::SystemInfo {
@@ -137,10 +141,21 @@ async fn handle_conn(
     // Shell event channel — bounded so a stalled hub (TCP backpressure) can't
     // let PTY output queue without limit and OOM the agent. The reader threads
     // call `blocking_send`, which applies real backpressure to the PTY producer
-    // via the kernel pipe buffer.
+    // via the kernel pipe buffer. The WorldObserver shares this channel so
+    // its WorldUpdate pushes ride the same backpressure-aware path.
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::channel::<KestrelMessage>(shell::SHELL_EVENT_CAPACITY);
-    let shell_mgr = ShellManager::new(event_tx);
+    let shell_mgr = ShellManager::new(event_tx.clone());
+
+    // World-state observer: every ~2s, sample local state and push a
+    // WorldUpdate event if anything changed. JoinHandle is dropped at
+    // function-end (when the connection terminates) which aborts the
+    // observer task naturally.
+    let _world_observer_task = crate::capabilities::world::WorldObserver::new(
+        event_tx.clone(),
+        world_displays,
+    )
+    .spawn();
 
     // Message loop — select! on incoming frames and outgoing shell events
     loop {

@@ -28,6 +28,7 @@ arboard      = { workspace = true }
 portable-pty = { workspace = true }
 hostname     = { workspace = true }
 zeroize      = { workspace = true }
+sha2         = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 accessibility     = { workspace = true }
