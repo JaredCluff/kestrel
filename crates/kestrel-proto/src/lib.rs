@@ -8,6 +8,6 @@ pub use auth::{
 };
 pub use keys::{is_modifier, parse_key_str};
 pub use message::{
-    AccessibilityNode, Button, ClipboardContent, DisplayInfo, KeyCode,
+    AccessibilityNode, Button, ClipboardContent, DisplayInfo, ErrorCode, KeyCode,
     KestrelMessage, Modifiers, MsgKind, OsInfo, Payload, PressRelease, Rect,
 };

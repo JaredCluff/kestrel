@@ -21,6 +21,12 @@ pub struct NodeRegistry {
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
 
+impl Default for NodeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NodeRegistry {
     pub fn new() -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(64);

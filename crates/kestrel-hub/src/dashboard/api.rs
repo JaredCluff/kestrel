@@ -102,7 +102,10 @@ pub async fn nodes_json(
     Json(snap.iter().map(NodeStatusDto::from).collect())
 }
 
-pub fn events_stream(
+/// Internal SSE stream builder for the `/api/events` route. Not part
+/// of the public API — `pub(crate)` lets `events_handler` and any
+/// future internal caller use it, but downstream crates can't.
+pub(crate) fn events_stream(
     registry: Arc<NodeRegistry>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = registry.subscribe();

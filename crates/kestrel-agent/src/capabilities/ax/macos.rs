@@ -7,6 +7,11 @@
 // that, the children list comes back empty and `fallback: false` —
 // callers should fall back to a screenshot.
 
+// objc 0.2's msg_send! macro expands into a `cfg(feature = "cargo-clippy")`
+// check that rustc's check-cfg pass complains about. The macros work
+// correctly; this allow just silences the false-positive build noise.
+#![allow(unexpected_cfgs)]
+
 use accessibility::{AXUIElement, AXUIElementAttributes};
 use kestrel_proto::AccessibilityNode;
 
@@ -21,6 +26,7 @@ pub fn describe() -> AccessibilityNode {
 
 /// Returns an AXUIElement for the frontmost (focused) application,
 /// or None if AX permission is denied or no frontmost app exists.
+#[allow(unexpected_cfgs)]
 fn frontmost_app() -> Option<AXUIElement> {
     use objc::{class, msg_send, sel, sel_impl};
     use objc::rc::autoreleasepool;
@@ -64,8 +70,8 @@ fn walk(elem: &AXUIElement, depth: u8) -> AccessibilityNode {
                 .filter(|s| !s.is_empty())
         });
 
-    let focused = elem.focused().map(|b| bool::from(b)).unwrap_or(false);
-    let enabled = elem.enabled().map(|b| bool::from(b)).unwrap_or(true);
+    let focused = elem.focused().map(bool::from).unwrap_or(false);
+    let enabled = elem.enabled().map(bool::from).unwrap_or(true);
 
     let children: Vec<AccessibilityNode> = if depth == 0 {
         vec![]

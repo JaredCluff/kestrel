@@ -42,6 +42,38 @@ pub enum Payload {
     ShellOutput { pty_id: u32, data: Vec<u8> },
     ShellResize { pty_id: u32, cols: u16, rows: u16 },
     ShellClose { pty_id: u32 },
+    /// Typed error response. Agents emit this in lieu of a normal
+    /// response when an operation fails (e.g. shell_run on an unknown
+    /// pty_id, write to a closed PTY, describe on a node without an
+    /// AX backend). Replaces ad-hoc anyhow stringification on the wire
+    /// — callers get a stable code they can switch on plus a human
+    /// message they can surface to operators.
+    Error { code: ErrorCode, message: String },
+}
+
+/// Stable error codes used in [`Payload::Error`]. Wire-stable: never
+/// re-number an existing variant; add new ones at the end. Codes are
+/// intentionally coarse — they're meant for the requester to decide
+/// "retry vs give up vs ask the operator", not for fine-grained
+/// programmatic recovery (the human message carries the detail).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorCode {
+    /// Inputs were structurally invalid (unknown pty_id, malformed
+    /// region, etc.). Retrying with the same inputs won't help.
+    InvalidArgument,
+    /// The agent doesn't support this operation on this platform
+    /// (e.g. AX describe on a Linux/Windows agent without a real
+    /// backend). Caller should fall back if possible.
+    Unsupported,
+    /// Permission denied by the OS — Accessibility, clipboard daemon,
+    /// PTY spawn, etc. Operator action required to fix.
+    PermissionDenied,
+    /// Resource not found — pty_id closed, display index out of
+    /// range, etc.
+    NotFound,
+    /// Catchall for unexpected agent-side errors. Look at `message`
+    /// for the detail.
+    Internal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -389,6 +421,30 @@ mod tests {
             payload: Payload::ShellClose { pty_id: 42 },
         };
         for msg in [write, resize, close] {
+            assert_eq!(roundtrip(&msg), msg);
+        }
+    }
+
+    #[test]
+    fn roundtrip_error_each_code() {
+        // Pin that every ErrorCode variant survives a wire roundtrip.
+        // Adding a new code without updating this test would silently
+        // give us a variant nothing exercises.
+        for code in [
+            ErrorCode::InvalidArgument,
+            ErrorCode::Unsupported,
+            ErrorCode::PermissionDenied,
+            ErrorCode::NotFound,
+            ErrorCode::Internal,
+        ] {
+            let msg = KestrelMessage {
+                stream_id: 99,
+                kind: MsgKind::Response,
+                payload: Payload::Error {
+                    code: code.clone(),
+                    message: format!("test message for {:?}", code),
+                },
+            };
             assert_eq!(roundtrip(&msg), msg);
         }
     }

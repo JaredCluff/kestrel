@@ -23,7 +23,11 @@ pub struct NodeLayout {
 }
 
 impl HubConfig {
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+    /// Parse a TOML-formatted string into a HubConfig. Named explicitly
+    /// rather than as a `FromStr` impl so the name doesn't shadow the
+    /// trait — callers reading `HubConfig::from_str(...)` are clearly
+    /// invoking this method, not a hypothetical `str.parse()` path.
+    pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
         #[derive(Deserialize)]
         struct Raw { hub: RawHub }
         #[derive(Deserialize)]
@@ -60,7 +64,7 @@ impl HubConfig {
     }
 
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        Self::from_str(&std::fs::read_to_string(path)?)
+        Self::from_toml_str(&std::fs::read_to_string(path)?)
     }
 }
 
@@ -249,7 +253,7 @@ position = { col = 0, row = 0 }
 node_id = "linux-dev"
 position = { col = 1, row = 0 }
 "#;
-        let cfg = HubConfig::from_str(s).unwrap();
+        let cfg = HubConfig::from_toml_str(s).unwrap();
         assert_eq!(cfg.nodes.len(), 2);
         assert_eq!(cfg.nodes[0].node_id, "linux-dev");
         assert_eq!(cfg.nodes[1].address.port(), 7272);
@@ -269,7 +273,7 @@ listen_dashboard = "0.0.0.0:7273"
 node_id = "bad-node"
 address = "not-a-valid-address"
 "#;
-        assert!(HubConfig::from_str(s).is_err());
+        assert!(HubConfig::from_toml_str(s).is_err());
     }
 
     #[test]
