@@ -498,4 +498,42 @@ mod tests {
             "expected at least one truncation marker"
         );
     }
+
+    #[test]
+    fn append_with_cap_remarks_after_drain() {
+        // Realistic shell-session pattern: caller `ReadShellBuffer` drains the
+        // map entry, more output streams in, possibly overflowing again. The
+        // truncation marker must re-appear on each fresh overflow — not
+        // suppressed because some earlier (now-drained) buffer happened to end
+        // with the marker bytes.
+        let mut buf = Vec::new();
+        append_with_cap(&mut buf, &vec![b'A'; SHELL_BUFFER_CAP + 100]);
+        assert!(
+            buf.windows(SHELL_TRUNCATED_MARKER.len())
+                .any(|w| w == SHELL_TRUNCATED_MARKER),
+            "first overflow should mark"
+        );
+
+        // Simulate the ReadShellBuffer drain: the actor's HashMap::remove
+        // discards the entire entry. The next ShellOutput frame starts with a
+        // fresh empty Vec.
+        let mut buf = Vec::new();
+
+        // Small refill that doesn't overflow — no marker yet.
+        append_with_cap(&mut buf, b"some shell output");
+        assert!(
+            !buf.windows(SHELL_TRUNCATED_MARKER.len())
+                .any(|w| w == SHELL_TRUNCATED_MARKER),
+            "no marker before overflow"
+        );
+
+        // Refill past the cap on the post-drain buffer.
+        append_with_cap(&mut buf, &vec![b'B'; SHELL_BUFFER_CAP]);
+        assert!(
+            buf.windows(SHELL_TRUNCATED_MARKER.len())
+                .any(|w| w == SHELL_TRUNCATED_MARKER),
+            "post-drain overflow should re-mark"
+        );
+        assert!(buf.len() <= SHELL_BUFFER_CAP + SHELL_TRUNCATED_MARKER.len());
+    }
 }
