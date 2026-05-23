@@ -95,8 +95,22 @@ mod tests {
 
     #[test]
     fn function_keys() {
-        for n in 1..=12 {
-            parse_key_str(&format!("f{n}")).unwrap();
+        // Pin every variant — a regression that swapped match arms
+        // (e.g. "f1" => KeyCode::F12) would silently route the wrong key
+        // into the agent without an Ok(_)-only assertion catching it.
+        let expected = [
+            KeyCode::F1, KeyCode::F2, KeyCode::F3, KeyCode::F4,
+            KeyCode::F5, KeyCode::F6, KeyCode::F7, KeyCode::F8,
+            KeyCode::F9, KeyCode::F10, KeyCode::F11, KeyCode::F12,
+        ];
+        for (n, want) in (1u8..=12).zip(expected) {
+            let got = parse_key_str(&format!("f{n}")).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(&want),
+                "f{n} should parse to F{n}, got {:?}",
+                got
+            );
         }
     }
 
