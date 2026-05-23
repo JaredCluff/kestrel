@@ -29,6 +29,8 @@ rdev       = { workspace = true }
 serde_json = { workspace = true }
 xcap       = { workspace = true }
 axum         = { workspace = true }
+axum-server  = { workspace = true }
+rustls_23    = { workspace = true }
 tokio-stream = { workspace = true }
 maud         = { workspace = true }
 futures      = { workspace = true }
@@ -42,3 +44,4 @@ kestrel-agent = { path = "../kestrel-agent" }
 tokio         = { workspace = true }
 tempfile      = { workspace = true }
 tower         = { workspace = true, features = ["util"] }
+rcgen         = "0.11"

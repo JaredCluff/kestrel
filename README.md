@@ -14,7 +14,11 @@ Hub↔agent uses TLS WebSocket with a one-direction PSK-HMAC challenge-response 
 
 The hub's dashboard at `:7273` is plain HTTP. Read-only endpoints (HTML dashboard, `/api/nodes` GET, `/api/events` SSE) are open. Mutation endpoints (`POST`/`DELETE /api/nodes`) require a Bearer control token from the keyring. LAN-only assumed for the dashboard host.
 
-**Out of scope (today):** mutual auth beyond the PSK, audit logging of MCP tool calls, dashboard TLS.
+**Out of scope (today):** mutual auth beyond the PSK.
+
+**Dashboard TLS.** Default is plain HTTP (LAN-trusted). Pass `--dashboard-cert <pem>` and `--dashboard-key <pem>` to `kestrel-hub start` to serve HTTPS. Both flags must be provided together; either alone is rejected at startup.
+
+**MCP audit log.** `kestrel-hub start --audit-log /var/log/kestrel.jsonl` appends one JSON Lines entry per MCP tool call (timestamp, tool, node_id, args summary, status, duration). `type_text`, `clipboard_write`, and `shell_write` log only the byte length of their text/data — never the bytes themselves; `shell_run` does log the command (highest-value audit signal).
 
 ## Setup
 
