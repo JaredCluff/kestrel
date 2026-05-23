@@ -49,14 +49,23 @@ pub fn render(f: &mut Frame, nodes: &[NodeStatusDto]) {
                 NodeStateDto::Online => Style::default().fg(ACCENT),
                 _ => Style::default().fg(MUTED),
             };
-            let latency = n
-                .latency_ms
-                .map(|ms| format!("{}ms", ms))
-                .unwrap_or_else(|| "—".into());
+            // Third column doubles as latency (when Online) or retry
+            // countdown (when Reconnecting/Offline) — latency_ms is meaningless
+            // for a node that isn't currently connected.
+            let third = match n.state {
+                NodeStateDto::Online => n
+                    .latency_ms
+                    .map(|ms| format!("{}ms", ms))
+                    .unwrap_or_else(|| "—".into()),
+                _ => n
+                    .next_retry_in_ms
+                    .map(|ms| format!("retry {}s", ms / 1000))
+                    .unwrap_or_else(|| "—".into()),
+            };
             Row::new(vec![
                 Cell::from(Span::raw(n.node_id.clone())),
                 Cell::from(Span::styled(state_text, state_style)),
-                Cell::from(Span::styled(latency, Style::default().fg(MUTED))),
+                Cell::from(Span::styled(third, Style::default().fg(MUTED))),
             ])
         })
         .collect();

@@ -2,49 +2,13 @@ use anyhow::Context;
 use enigo::{Axis, Button as EnigoButton, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use kestrel_proto::{Button, KeyCode, Modifiers, PressRelease};
 
+// `parse_key_str` lives in `kestrel_proto::keys` — re-exported via the crate
+// root for callers that want a single source of truth for key-name parsing.
+
 pub fn normalize_to_pixels(x: f64, y: f64, width: u32, height: u32) -> (i32, i32) {
     let px = ((x * width as f64).round() as u32).min(width.saturating_sub(1)) as i32;
     let py = ((y * height as f64).round() as u32).min(height.saturating_sub(1)) as i32;
     (px, py)
-}
-
-pub fn parse_key_str(s: &str) -> anyhow::Result<KeyCode> {
-    Ok(match s.to_lowercase().as_str() {
-        "ctrl" | "control" => KeyCode::Control,
-        "shift" => KeyCode::Shift,
-        "alt" | "option" => KeyCode::Alt,
-        "meta" | "cmd" | "command" | "super" | "win" => KeyCode::Meta,
-        "return" | "enter" => KeyCode::Return,
-        "backspace" => KeyCode::Backspace,
-        "tab" => KeyCode::Tab,
-        "escape" | "esc" => KeyCode::Escape,
-        "delete" | "del" => KeyCode::Delete,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" | "pgup" => KeyCode::PageUp,
-        "pagedown" | "pgdn" => KeyCode::PageDown,
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "space" => KeyCode::Space,
-        "f1" => KeyCode::F1,
-        "f2" => KeyCode::F2,
-        "f3" => KeyCode::F3,
-        "f4" => KeyCode::F4,
-        "f5" => KeyCode::F5,
-        "f6" => KeyCode::F6,
-        "f7" => KeyCode::F7,
-        "f8" => KeyCode::F8,
-        "f9" => KeyCode::F9,
-        "f10" => KeyCode::F10,
-        "f11" => KeyCode::F11,
-        "f12" => KeyCode::F12,
-        "capslock" | "caps_lock" | "caps" => KeyCode::CapsLock,
-        "numlock" | "num_lock" | "numpad_lock" => KeyCode::NumLock,
-        s if s.chars().count() == 1 => KeyCode::Char(s.chars().next().unwrap()),
-        other => anyhow::bail!("unknown key: {}", other),
-    })
 }
 
 fn to_enigo_key(kc: &KeyCode) -> Key {
@@ -109,10 +73,7 @@ pub async fn inject_key_event(
     key: KeyCode,
     mods: Modifiers,
     action: PressRelease,
-    display_w: u32,
-    display_h: u32,
 ) -> anyhow::Result<()> {
-    let _ = (display_w, display_h);
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| anyhow::anyhow!("enigo init: {e:?}"))?;
@@ -195,17 +156,8 @@ pub async fn inject_scroll(dx: f64, dy: f64) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kestrel_proto::KeyCode;
 
-    #[test]
-    fn key_string_parsing() {
-        assert!(matches!(parse_key_str("ctrl"), Ok(KeyCode::Control)));
-        assert!(matches!(parse_key_str("shift"), Ok(KeyCode::Shift)));
-        assert!(matches!(parse_key_str("return"), Ok(KeyCode::Return)));
-        assert!(matches!(parse_key_str("escape"), Ok(KeyCode::Escape)));
-        assert!(matches!(parse_key_str("a"), Ok(KeyCode::Char('a'))));
-        assert!(parse_key_str("notakey_xyz").is_err());
-    }
+    // `parse_key_str` tests live in `kestrel_proto::keys` now.
 
     #[test]
     fn normalize_coords() {

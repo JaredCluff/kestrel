@@ -210,6 +210,10 @@ async fn run_actor(ws: WsStream, mut cmd_rx: mpsc::Receiver<ActorCmd>) {
 pub struct NodeHandle {
     pub node_id: String,
     pub os_info: OsInfo,
+    /// Displays the agent reported at connection time. Used for pre-flight
+    /// validation of `screenshot` requests so an out-of-range `display` index
+    /// returns a clear error instead of a misleading empty PNG.
+    pub displays: Vec<kestrel_proto::DisplayInfo>,
     cmd_tx: mpsc::Sender<ActorCmd>,
 }
 
@@ -374,13 +378,13 @@ pub async fn connect(
         .context("WebSocket handshake")?;
     let (mut tx, mut rx) = ws.split();
 
-    let (node_id, os_info) = do_handshake(&mut tx, &mut rx, psk, &tls_exporter).await?;
+    let (node_id, os_info, displays) = do_handshake(&mut tx, &mut rx, psk, &tls_exporter).await?;
 
     let ws = tx.reunite(rx).expect("same stream");
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let actor_join = tokio::spawn(run_actor(ws, cmd_rx));
 
-    Ok((NodeHandle { node_id, os_info, cmd_tx }, actor_join))
+    Ok((NodeHandle { node_id, os_info, displays, cmd_tx }, actor_join))
 }
 
 pub async fn ping_once(addr: SocketAddr, psk: &[u8]) -> anyhow::Result<Duration> {
@@ -395,7 +399,7 @@ async fn do_handshake<Tx, Rx>(
     rx: &mut Rx,
     psk: &[u8],
     tls_exporter: &[u8],
-) -> anyhow::Result<(String, OsInfo)>
+) -> anyhow::Result<(String, OsInfo, Vec<kestrel_proto::DisplayInfo>)>
 where
     Tx: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
     Rx: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -414,11 +418,16 @@ where
     })?)).await?;
     let raw = rx.next().await.context("no SystemInfo from agent")??;
     let km: KestrelMessage = decode(raw.into_data())?;
-    let Payload::SystemInfo { os, hostname, .. } = km.payload else {
+    let Payload::SystemInfo { os, hostname, displays } = km.payload else {
         anyhow::bail!("expected SystemInfo");
     };
-    tracing::info!("connected to node {} ({})", hostname, os.name);
-    Ok((hostname, os))
+    tracing::info!(
+        "connected to node {} ({}, {} display(s))",
+        hostname,
+        os.name,
+        displays.len()
+    );
+    Ok((hostname, os, displays))
 }
 
 fn encode(msg: &KestrelMessage) -> anyhow::Result<Vec<u8>> {

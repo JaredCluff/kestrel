@@ -34,6 +34,13 @@ impl NodeRegistry {
     pub async fn register(&self, handle: NodeHandle) {
         let node_id = handle.node_id.clone();
         let os = handle.os_info.clone();
+        // Insert the handle FIRST so that any consumer reacting to the
+        // `Connected` event (or polling `list()` after seeing `Online` status)
+        // finds the handle available for MCP calls. Previously the order was
+        // status → nodes → broadcast, which left a microsecond window where
+        // `status_snapshot()` reported Online but `screenshot()` etc. errored
+        // with "node 'X' not connected".
+        self.nodes.write().await.insert(node_id.clone(), handle);
         self.status.write().await.insert(node_id.clone(), NodeStatus {
             node_id: node_id.clone(),
             state: NodeState::Online,
@@ -42,8 +49,7 @@ impl NodeRegistry {
             last_seen: SystemTime::now(),
             next_retry_in: None,
         });
-        self.nodes.write().await.insert(node_id.clone(), handle);
-        // Broadcast errors only if there are no subscribers — that's fine, ignore.
+        // Broadcast errors only when there are no subscribers — fine, ignore.
         let _ = self.event_tx.send(NodeEvent::Connected { node_id, os });
     }
 
@@ -129,20 +135,71 @@ impl NodeRegistry {
     // ── Phase 2 ───────────────────────────────────────────────────────────────
 
     pub async fn screenshot(&self, node_id: &str, display: u8, region: Option<Rect>) -> anyhow::Result<Vec<u8>> {
-        self.get(node_id).await?.screenshot(display, region).await
+        let handle = self.get(node_id).await?;
+        // Pre-flight: validate the display index against what the agent
+        // reported at connect time. Without this, an out-of-range index ends
+        // up as a generic empty-PNG / "screenshot returned empty bytes" error
+        // that doesn't tell the caller why.
+        if !handle.displays.is_empty()
+            && !handle.displays.iter().any(|d| d.id == display)
+        {
+            let known: Vec<u8> = handle.displays.iter().map(|d| d.id).collect();
+            anyhow::bail!(
+                "display {} out of range on '{}' (available: {:?})",
+                display,
+                node_id,
+                known
+            );
+        }
+        handle.screenshot(display, region).await
     }
 
     pub async fn type_text(&self, node_id: &str, text: String) -> anyhow::Result<()> {
         self.get(node_id).await?.send_type_text(text).await
     }
 
+    /// Press a key combination. Modifier names (ctrl, shift, alt, meta and
+    /// their aliases) are folded into a `Modifiers` set and sent as held
+    /// state alongside each non-modifier key. The agent's input layer handles
+    /// modifier press/release framing atomically per event, so a call like
+    /// `key_combo(["ctrl", "c"])` produces a single `KeyEvent` with
+    /// `Modifiers { ctrl: true, .. }` and `action: Click`, not four separate
+    /// keypresses across the network.
     pub async fn key_combo(&self, node_id: &str, keys: Vec<KeyCode>) -> anyhow::Result<()> {
         let h = self.get(node_id).await?;
-        for key in &keys {
-            h.send_key_event(key.clone(), Modifiers::default(), PressRelease::Press).await?;
+
+        let mut mods = Modifiers::default();
+        let mut non_modifiers: Vec<KeyCode> = Vec::new();
+        for key in keys {
+            match key {
+                KeyCode::Control => mods.ctrl = true,
+                KeyCode::Shift => mods.shift = true,
+                KeyCode::Alt => mods.alt = true,
+                KeyCode::Meta => mods.meta = true,
+                other => non_modifiers.push(other),
+            }
         }
-        for key in keys.iter().rev() {
-            h.send_key_event(key.clone(), Modifiers::default(), PressRelease::Release).await?;
+
+        if non_modifiers.is_empty() {
+            // Modifier-only call (e.g. just `["shift"]`) — fire each as a
+            // standalone Click event with no held modifiers.
+            for (active, k) in [
+                (mods.ctrl, KeyCode::Control),
+                (mods.shift, KeyCode::Shift),
+                (mods.alt, KeyCode::Alt),
+                (mods.meta, KeyCode::Meta),
+            ] {
+                if active {
+                    h.send_key_event(k, Modifiers::default(), PressRelease::Click).await?;
+                }
+            }
+        } else {
+            // Send each non-modifier as a Click while holding the modifier
+            // set. The agent's `inject_key_event` brackets each event with the
+            // modifier press/release so chords like Cmd+Shift+T work.
+            for k in non_modifiers {
+                h.send_key_event(k, mods.clone(), PressRelease::Click).await?;
+            }
         }
         Ok(())
     }
