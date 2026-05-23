@@ -22,6 +22,22 @@ pub mod templates;
 /// Hot-reload mutates this under the `config_write_lock` to keep file + memory in sync.
 pub type SupervisorMap = Arc<tokio::sync::RwLock<std::collections::HashMap<String, JoinHandle<()>>>>;
 
+/// One cached screenshot for a node. PNG bytes captured at
+/// `captured_at`. The dashboard's screenshot endpoint serves these
+/// directly when fresh; on cache miss / staleness it triggers a fresh
+/// capture via the registry.
+#[derive(Clone)]
+pub struct CachedScreenshot {
+    pub png: std::sync::Arc<Vec<u8>>,
+    pub captured_at: std::time::Instant,
+}
+
+/// Cache: node_id → most recent CachedScreenshot. TTL is checked by
+/// the handler. Stored bytes are Arc'd so multiple concurrent reads
+/// don't clone megabyte payloads.
+pub type ScreenshotCache =
+    Arc<tokio::sync::RwLock<std::collections::HashMap<String, CachedScreenshot>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub registry: Arc<NodeRegistry>,
@@ -45,6 +61,10 @@ pub struct AppState {
     /// memory views stay synchronized. Hot-reload — no hub restart
     /// needed to add or move a node on the grid.
     pub layout: crate::kvm::SharedLayout,
+    /// Cached screenshots per node, served via /api/screenshot/:id.
+    /// Bounded staleness via the handler's TTL check; no eviction needed
+    /// since the working set is bounded by the configured nodes.
+    pub screenshots: ScreenshotCache,
     pub supervisors: SupervisorMap,
     /// Serializes config file read-modify-write cycles across concurrent HTTP requests.
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -88,6 +108,7 @@ impl AppState {
             master_secret,
             session_key,
             layout,
+            screenshots: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             control_token: None,
@@ -126,6 +147,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/layout", axum::routing::post(api::post_layout))
         .route("/api/layout/:node_id", axum::routing::delete(api::delete_layout))
         .route("/api/events", get(api::events_handler))
+        .route("/api/screenshot/:node_id", get(api::screenshot_handler))
         .route("/assets/:name", get(asset_handler))
         .with_state(state)
 }
