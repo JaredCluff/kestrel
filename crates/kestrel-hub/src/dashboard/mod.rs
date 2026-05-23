@@ -119,6 +119,8 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", axum::routing::post(api::logout))
         .route("/ui/nodes", axum::routing::post(api::ui_add_node))
         .route("/ui/nodes/:node_id/delete", axum::routing::post(api::ui_delete_node))
+        .route("/ui/layout", axum::routing::post(api::ui_set_layout))
+        .route("/ui/layout/:node_id/delete", axum::routing::post(api::ui_unset_layout))
         .route("/api/nodes", get(api::nodes_json).post(api::post_node))
         .route("/api/nodes/:node_id", axum::routing::delete(api::delete_node))
         .route("/api/layout", axum::routing::post(api::post_layout))
@@ -149,8 +151,9 @@ async fn index(
     headers: axum::http::HeaderMap,
 ) -> maud::Markup {
     let snapshot = state.registry.status_snapshot().await;
+    let layout = state.layout.read().await.clone();
     let authed = api::is_authenticated(&state, &headers);
-    templates::page(&snapshot, authed)
+    templates::page_with_layout(&snapshot, &layout, authed)
 }
 
 async fn sse_handler(

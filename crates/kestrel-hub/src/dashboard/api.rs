@@ -610,6 +610,70 @@ pub async fn ui_delete_node(
     }
 }
 
+// -------- Layout UI handlers ------------------------------------------------
+//
+// Form-driven counterparts to POST /api/layout and DELETE /api/layout/:id.
+// Same redirect-on-success, redirect-to-login-on-unauth, inline-error-banner
+// pattern as the add/delete-node UI.
+
+#[derive(serde::Deserialize)]
+pub struct UiLayoutForm {
+    pub node_id: String,
+    /// `i64` here so we can serialize a -1 / 0 / 1 grid without needing
+    /// per-axis signed-int parsing in the handler.
+    pub col: i64,
+    pub row: i64,
+}
+
+pub async fn ui_set_layout(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Form(form): axum::Form<UiLayoutForm>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_authenticated(&state, &headers) {
+        return axum::response::Redirect::to("/login").into_response();
+    }
+    let body = LayoutBody {
+        node_id: form.node_id,
+        col: form.col,
+        row: form.row,
+    };
+    match set_layout_impl(&state, &body).await {
+        Ok(()) => axum::response::Redirect::to("/").into_response(),
+        Err((status, msg)) => {
+            let snapshot = state.registry.status_snapshot().await;
+            (
+                status,
+                crate::dashboard::templates::page_with_error(&snapshot, true, &msg),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn ui_unset_layout(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(node_id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_authenticated(&state, &headers) {
+        return axum::response::Redirect::to("/login").into_response();
+    }
+    match delete_layout_impl(&state, &node_id).await {
+        Ok(()) => axum::response::Redirect::to("/").into_response(),
+        Err((status, msg)) => {
+            let snapshot = state.registry.status_snapshot().await;
+            (
+                status,
+                crate::dashboard::templates::page_with_error(&snapshot, true, &msg),
+            )
+                .into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
