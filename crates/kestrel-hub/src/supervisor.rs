@@ -63,6 +63,14 @@ pub fn spawn(
                         );
                         handle.node_id = node_cfg.node_id.clone();
                     }
+                    // Phase 8: record capabilities under the
+                    // canonical node_id BEFORE register() so any
+                    // immediate fleet_find call sees them.
+                    if let Some(caps) = handle.capabilities.clone() {
+                        registry
+                            .record_capabilities(&node_cfg.node_id, caps)
+                            .await;
+                    }
                     registry.register(handle).await;
 
                     // Spawn a side task that forwards the agent's

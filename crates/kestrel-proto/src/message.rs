@@ -55,6 +55,26 @@ pub enum Payload {
     /// these to maintain a per-node `WorldState` cache exposed via
     /// the `world_state` and `world_diff_since` MCP tools.
     WorldUpdate { state: crate::world::WorldState },
+    /// Phase 8 — Capability advertisement. Variant 26.
+    /// Agent sends this once after `SystemInfo` on every (re)connect.
+    /// The hub aggregates per-node capabilities so the AI can ask
+    /// for "give me a node with a GPU and a connected display" via
+    /// the `fleet_find` MCP tool.
+    Capabilities { caps: Capabilities },
+}
+
+/// What an agent can do — coarse boolean flags + the OS name. The
+/// AI uses these as predicates to find a suitable node without
+/// hardcoding `node_id`s. Wire-stable: add new flags only by adding
+/// new optional fields with defaults, never re-arrange.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Capabilities {
+    /// Lowercase OS name: "macos", "linux", "windows", "freebsd", ...
+    pub os: String,
+    pub has_gpu: bool,
+    pub has_display: bool,
+    pub has_sudo: bool,
+    pub has_docker: bool,
 }
 
 /// Stable error codes used in [`Payload::Error`]. Wire-stable: never

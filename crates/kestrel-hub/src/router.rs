@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use kestrel_proto::{AccessibilityNode, Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect, WorldState};
+use kestrel_proto::{AccessibilityNode, Button, Capabilities, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect, WorldState};
 use tokio::sync::RwLock;
 
 use crate::events::{NodeEvent, NodeState, NodeStatus};
@@ -12,6 +12,29 @@ use crate::transport::NodeHandle;
 pub struct NodeInfo {
     pub node_id: String,
     pub os: OsInfo,
+}
+
+/// Phase 8: predicate over `Capabilities`. Every `Option` is an
+/// optional constraint; `None` means "don't care." A node matches
+/// when every `Some(_)` constraint matches its reported capability.
+#[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct CapabilityNeeds {
+    pub os: Option<String>,
+    pub has_gpu: Option<bool>,
+    pub has_display: Option<bool>,
+    pub has_sudo: Option<bool>,
+    pub has_docker: Option<bool>,
+}
+
+impl CapabilityNeeds {
+    pub fn matches(&self, c: &Capabilities) -> bool {
+        if let Some(o) = &self.os { if c.os != *o { return false; } }
+        if let Some(g) = self.has_gpu { if c.has_gpu != g { return false; } }
+        if let Some(d) = self.has_display { if c.has_display != d { return false; } }
+        if let Some(s) = self.has_sudo { if c.has_sudo != s { return false; } }
+        if let Some(d) = self.has_docker { if c.has_docker != d { return false; } }
+        true
+    }
 }
 
 #[derive(Clone)]
@@ -24,6 +47,10 @@ pub struct NodeRegistry {
     /// and `world_diff_since` to back the MCP tools and the
     /// dashboard's /api/world endpoint.
     world: Arc<RwLock<HashMap<String, WorldState>>>,
+    /// Phase 8: per-node capability advertisement. Populated by
+    /// `record_capabilities` on every (re)handshake. Queried by
+    /// `find_nodes_with` to back the `fleet_find` MCP tool.
+    capabilities: Arc<RwLock<HashMap<String, Capabilities>>>,
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
 
@@ -40,8 +67,37 @@ impl NodeRegistry {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(HashMap::new())),
             world: Arc::new(RwLock::new(HashMap::new())),
+            capabilities: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
         }
+    }
+
+    /// Phase 8: record a node's capabilities. Called from the actor
+    /// on inbound `Payload::Capabilities`. Overwrites any prior
+    /// record — agents may report different capabilities on
+    /// reconnect (e.g. GPU plugged in between connections).
+    pub async fn record_capabilities(&self, node_id: &str, caps: Capabilities) {
+        self.capabilities.write().await.insert(node_id.to_string(), caps);
+    }
+
+    /// Look up a node's reported capabilities.
+    pub async fn capabilities_for(&self, node_id: &str) -> Option<Capabilities> {
+        self.capabilities.read().await.get(node_id).cloned()
+    }
+
+    /// Phase 8: find all nodes whose capabilities match the given
+    /// predicate. Each `Option` in `needs` is a constraint: `Some(v)`
+    /// requires the node's capability to equal `v`; `None` doesn't
+    /// constrain that field. Returns sorted-by-node_id node IDs.
+    pub async fn find_nodes_with(&self, needs: &CapabilityNeeds) -> Vec<String> {
+        let caps = self.capabilities.read().await;
+        let mut matching: Vec<String> = caps
+            .iter()
+            .filter(|(_, c)| needs.matches(c))
+            .map(|(id, _)| id.clone())
+            .collect();
+        matching.sort();
+        matching
     }
 
     /// Phase 6: ingest a WorldUpdate from an agent. No-op when the new

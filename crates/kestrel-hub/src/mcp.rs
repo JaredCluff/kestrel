@@ -643,6 +643,23 @@ impl KestrelMcp {
         })
         .await
     }
+
+    // ── Phase 8 capability-aware routing ──────────────────────────────────
+
+    #[tool(description = "Find connected nodes matching a capability predicate. Any field in `needs` is optional; nodes match when every supplied field matches their reported capability. Example: { has_gpu: true, has_display: true } returns node_ids of nodes that have both. Empty `needs` returns all nodes with a recorded capability. Returns a JSON array of node_id strings, sorted alphabetically.")]
+    async fn fleet_find(
+        &self,
+        Parameters(needs): Parameters<crate::router::CapabilityNeeds>,
+    ) -> Result<CallToolResult, McpError> {
+        let summary = format!("{:?}", needs);
+        self.audit_call("fleet_find", "*", summary, || async move {
+            let matches = self.registry.find_nodes_with(&needs).await;
+            let json = serde_json::to_string(&matches)
+                .unwrap_or_else(|e| format!("[\"error: {}\"]", e));
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
+        .await
+    }
 }
 
 #[tool_handler]

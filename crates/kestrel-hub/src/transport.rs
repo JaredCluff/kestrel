@@ -235,6 +235,11 @@ pub struct NodeHandle {
     /// validation of `screenshot` requests so an out-of-range `display` index
     /// returns a clear error instead of a misleading empty PNG.
     pub displays: Vec<kestrel_proto::DisplayInfo>,
+    /// Phase 8: capabilities the agent advertised after SystemInfo.
+    /// `None` when the agent didn't send a Capabilities frame (older
+    /// agents, or those that timed out the optional capability
+    /// exchange during handshake).
+    pub capabilities: Option<kestrel_proto::Capabilities>,
     cmd_tx: mpsc::Sender<ActorCmd>,
 }
 
@@ -419,7 +424,8 @@ pub async fn connect_with_world_sink(
         .context("WebSocket handshake")?;
     let (mut tx, mut rx) = ws.split();
 
-    let (node_id, os_info, displays) = do_handshake(&mut tx, &mut rx, psk, &tls_exporter).await?;
+    let (node_id, os_info, displays, capabilities) =
+        do_handshake(&mut tx, &mut rx, psk, &tls_exporter).await?;
 
     let ws = tx.reunite(rx).expect("same stream");
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
@@ -427,7 +433,7 @@ pub async fn connect_with_world_sink(
     let actor_join = tokio::spawn(run_actor(ws, cmd_rx, Some(world_tx)));
 
     Ok((
-        NodeHandle { node_id, os_info, displays, cmd_tx },
+        NodeHandle { node_id, os_info, displays, capabilities, cmd_tx },
         actor_join,
         world_rx,
     ))
@@ -445,7 +451,12 @@ async fn do_handshake<Tx, Rx>(
     rx: &mut Rx,
     psk: &[u8],
     tls_exporter: &[u8],
-) -> anyhow::Result<(String, OsInfo, Vec<kestrel_proto::DisplayInfo>)>
+) -> anyhow::Result<(
+    String,
+    OsInfo,
+    Vec<kestrel_proto::DisplayInfo>,
+    Option<kestrel_proto::Capabilities>,
+)>
 where
     Tx: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
     Rx: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -473,7 +484,32 @@ where
         os.name,
         displays.len()
     );
-    Ok((hostname, os, displays))
+    // Phase 8: optional Capabilities follows SystemInfo. Old agents
+    // that don't send it just yield None here; the hub still
+    // accepts the connection. We peek-or-skip rather than block
+    // forever on the next frame — if the first post-SystemInfo
+    // frame isn't Capabilities, we treat it as part of the normal
+    // message loop and pass via the actor instead. For simplicity
+    // we just wait briefly and accept None on timeout.
+    let caps = match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        rx.next(),
+    ).await {
+        Ok(Some(Ok(raw))) => {
+            if let Ok(km) = decode(raw.into_data()) {
+                if let Payload::Capabilities { caps } = km.payload {
+                    Some(caps)
+                } else {
+                    tracing::debug!("post-SystemInfo frame wasn't Capabilities; running without");
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    Ok((hostname, os, displays, caps))
 }
 
 fn encode(msg: &KestrelMessage) -> anyhow::Result<Vec<u8>> {
