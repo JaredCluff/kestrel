@@ -17,7 +17,10 @@ impl AgentConfig {
         AgentConfig { listen, node_id, psk: psk.into() }
     }
 
-    pub fn from_str(s: &str) -> anyhow::Result<Self> {
+    /// Parse a TOML-formatted string into an AgentConfig. Named
+    /// explicitly rather than as `FromStr` so the name doesn't shadow
+    /// the trait.
+    pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
         #[derive(Deserialize)]
         struct Raw { agent: RawAgent }
         #[derive(Deserialize)]
@@ -41,7 +44,7 @@ impl AgentConfig {
     }
 
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
-        Self::from_str(&std::fs::read_to_string(path)?)
+        Self::from_toml_str(&std::fs::read_to_string(path)?)
     }
 }
 
@@ -96,7 +99,7 @@ listen  = "0.0.0.0:7272"
 node_id = "test-node"
 psk     = "deadbeefdeadbeefdeadbeefdeadbeef"
 "#;
-        let cfg = AgentConfig::from_str(s).unwrap();
+        let cfg = AgentConfig::from_toml_str(s).unwrap();
         assert_eq!(cfg.node_id, "test-node");
         assert_eq!(cfg.listen.port(), 7272);
         // Zeroizing<Vec<u8>> derefs to &[u8] for comparison.

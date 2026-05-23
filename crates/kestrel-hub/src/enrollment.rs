@@ -208,7 +208,7 @@ mod scaffold_tests {
         assert!(contents.contains("listen_mcp"));
         assert!(contents.contains("0.0.0.0:7273"));
         // Round-trip through HubConfig::from_str to ensure validity.
-        crate::config::HubConfig::from_str(&contents).unwrap();
+        crate::config::HubConfig::from_toml_str(&contents).unwrap();
     }
 
     #[test]

@@ -34,6 +34,13 @@ accessibility     = { workspace = true }
 accessibility-sys = { workspace = true }
 objc              = { workspace = true }
 
+# Silence the `unexpected_cfgs` warnings emitted by objc 0.2's macros
+# (which test `cfg(feature = "cargo-clippy")` for compatibility with
+# old clippy versions — a cfg modern rustc's check-cfg pass doesn't
+# know about). The macros work correctly; the warnings are noise.
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
+
 # Linux: AT-SPI via D-Bus. atspi is async + zbus-based; we run it under a
 # small tokio current-thread runtime inside describe() so the public
 # entry point stays synchronous, matching the macOS and Windows paths.
