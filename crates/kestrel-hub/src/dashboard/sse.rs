@@ -27,9 +27,13 @@ pub fn stream(
     };
     let initial_stream = futures::stream::once(initial_snapshot);
 
-    // On every event (including Lagged), re-render the full snapshot. Coalescing
-    // multiple events into one render is intentional — the browser only needs the
-    // latest state.
+    // On every event (including Lagged), re-render the full snapshot. Each
+    // broadcast item produces one render — there is no per-tick coalescing
+    // here. We accept the work cost because each render reflects the latest
+    // state at the moment it runs, so a burst of N events emits N
+    // identical-looking fragments and the client converges quickly. If this
+    // ever becomes a perf bottleneck, wrap the stream in `.ready_chunks(N)`
+    // or `.throttle(...)` to debounce.
     let rx = registry.subscribe();
     let updates = BroadcastStream::new(rx).then(move |_msg| {
         let registry = rx_registry.clone();

@@ -179,6 +179,13 @@ pub async fn post_node(
     save_doc(&state.config_path, &doc)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Seed registry status synchronously before spawning the supervisor so
+    // an immediate follow-up `GET /api/nodes` includes the new row. Without
+    // this, the supervisor's own `mark_reconnecting` call happens
+    // asynchronously after this handler returns, leaving a race window where
+    // the POST response says "Reconnecting" but a racing GET sees no node.
+    state.registry.mark_reconnecting(&body.node_id, 0).await;
+
     let handle = supervisor::spawn(
         crate::config::NodeConfig { node_id: body.node_id.clone(), address },
         state.registry.clone(),
@@ -186,16 +193,25 @@ pub async fn post_node(
     );
     state.supervisors.write().await.insert(body.node_id.clone(), handle);
 
-    let snap_status = NodeStatusDto {
-        node_id: body.node_id.clone(),
-        state: NodeStateDto::Reconnecting,
-        os_name: None,
-        latency_ms: None,
-        last_seen_unix: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-        next_retry_in_ms: None,
-    };
-    Ok((StatusCode::CREATED, axum::Json(snap_status)))
+    // Now that the registry has been seeded, return its actual view (not a
+    // fabricated DTO) so the client sees the same state a follow-up
+    // `GET /api/nodes` would return for this row.
+    let snap = state.registry.status_snapshot().await;
+    let dto = snap
+        .iter()
+        .find(|s| s.node_id == body.node_id)
+        .map(NodeStatusDto::from)
+        .unwrap_or_else(|| NodeStatusDto {
+            // Defensive fallback — should be unreachable now that we seeded.
+            node_id: body.node_id.clone(),
+            state: NodeStateDto::Reconnecting,
+            os_name: None,
+            latency_ms: None,
+            last_seen_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            next_retry_in_ms: None,
+        });
+    Ok((StatusCode::CREATED, axum::Json(dto)))
 }
 
 /// DELETE /api/nodes/:node_id
@@ -211,15 +227,32 @@ pub async fn delete_node(
 
     let mut doc = load_doc(&state.config_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    remove_node(&mut doc, &node_id)
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
-    save_doc(&state.config_path, &doc)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let in_config = remove_node(&mut doc, &node_id).is_ok();
+    if in_config {
+        save_doc(&state.config_path, &doc)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
-    if let Some(handle) = state.supervisors.write().await.remove(&node_id) {
+    // Tear down live state (supervisor task + registry entry) regardless of
+    // whether the config-file row was present. A node that was added live
+    // but later edited out of the config externally would otherwise leak a
+    // running supervisor. We need at least ONE side to have evidence of the
+    // node for this to be a 204; if neither has it, the request was bogus.
+    let supervisor_removed = state.supervisors.write().await.remove(&node_id);
+    let had_live_state = supervisor_removed.is_some();
+    if let Some(handle) = supervisor_removed {
         handle.abort();
     }
-    state.registry.forget_node(&node_id).await;
+    if had_live_state {
+        state.registry.forget_node(&node_id).await;
+    }
+
+    if !in_config && !had_live_state {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("node '{}' not found in config or live state", node_id),
+        ));
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

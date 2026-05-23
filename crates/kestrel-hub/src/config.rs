@@ -291,4 +291,114 @@ listen_dashboard = "0.0.0.0:7273"
         assert_eq!(layout[0]["position"]["col"].as_integer().unwrap(), 1);
         assert_eq!(layout[0]["position"]["row"].as_integer().unwrap(), 2);
     }
+
+    // ── Pass 6 coverage additions ────────────────────────────────────────────
+
+    #[test]
+    fn remove_layout_removes_matching_entry() {
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+[[hub.layout]]
+node_id = "a"
+position = { col = 0, row = 0 }
+[[hub.layout]]
+node_id = "b"
+position = { col = 1, row = 0 }
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        super::remove_layout(&mut doc, "a").unwrap();
+        let layout = doc["hub"]["layout"].as_array().unwrap();
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout[0]["node_id"].as_str().unwrap(), "b");
+    }
+
+    #[test]
+    fn remove_layout_errors_on_missing_node() {
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+[[hub.layout]]
+node_id = "a"
+position = { col = 0, row = 0 }
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        let err = super::remove_layout(&mut doc, "ghost").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn remove_layout_errors_when_layout_array_missing() {
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        let err = super::remove_layout(&mut doc, "a").unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn add_node_errors_when_hub_section_missing() {
+        let toml = r#"[other]
+foo = "bar"
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        let err = super::add_node(
+            &mut doc,
+            "a",
+            "127.0.0.1:7272".parse().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("[hub]"));
+    }
+
+    #[test]
+    fn set_layout_errors_when_hub_section_missing() {
+        let toml = "";
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        let err = super::set_layout(&mut doc, "a", 0, 0).unwrap_err();
+        assert!(err.to_string().contains("[hub]"));
+    }
+
+    #[test]
+    fn load_doc_errors_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.toml");
+        let err = super::load_doc(path.to_str().unwrap()).unwrap_err();
+        // Error message should name the path so the operator knows what to
+        // look at.
+        assert!(err.to_string().contains("does-not-exist.toml"));
+    }
+
+    #[test]
+    fn load_doc_errors_on_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.toml");
+        std::fs::write(&path, "this is not valid = [toml").unwrap();
+        let err = super::load_doc(path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("parse"));
+    }
+
+    #[test]
+    fn save_doc_then_load_doc_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("k.toml");
+        let toml = r#"
+[hub]
+listen_mcp       = "stdio"
+listen_dashboard = "0.0.0.0:7273"
+"#;
+        let mut doc: toml::Value = toml::from_str(toml).unwrap();
+        super::add_node(&mut doc, "alpha", "127.0.0.1:7272".parse().unwrap()).unwrap();
+        super::save_doc(path.to_str().unwrap(), &doc).unwrap();
+        // Round-trip: load it back and verify.
+        let loaded = super::load_doc(path.to_str().unwrap()).unwrap();
+        let nodes = loaded["hub"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["node_id"].as_str().unwrap(), "alpha");
+    }
 }

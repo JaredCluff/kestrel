@@ -156,12 +156,27 @@ async fn main() -> anyhow::Result<()> {
         Command::Connect { config } => {
             let cfg = HubConfig::from_file(&config)?;
             let psk = enrollment::load_psk()?;
+            // Hold every (NodeHandle, actor JoinHandle) across the ctrl_c
+            // wait. Previously these were per-loop-iteration locals — they
+            // dropped at end-of-iteration, closing the cmd_tx and tearing
+            // down each connection BEFORE we even started blocking. The
+            // "connected: …" lines were accurate at the moment they printed
+            // but stale by the time the user could see them.
+            let mut handles: Vec<(transport::NodeHandle, tokio::task::JoinHandle<()>)> =
+                Vec::with_capacity(cfg.nodes.len());
             for node in &cfg.nodes {
-                let (conn, _actor) = transport::connect(node.address, &psk).await?;
+                let (conn, actor) = transport::connect(node.address, &psk).await?;
                 println!("connected: {} ({})", conn.node_id, conn.os_info.name);
+                handles.push((conn, actor));
             }
             tokio::signal::ctrl_c().await?;
             println!("shutting down");
+            // Drop handles first (closes the cmd_tx end), then abort the
+            // actor tasks. Dropping cmd_tx alone is enough for clean exit
+            // but the explicit abort makes shutdown deterministic.
+            for (_conn, actor) in handles {
+                actor.abort();
+            }
         }
         Command::Start { config } => {
             let cfg = HubConfig::from_file(&config)?;
