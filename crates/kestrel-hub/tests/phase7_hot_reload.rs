@@ -219,6 +219,16 @@ listen_dashboard = "0.0.0.0:7273"
     let resp = app.oneshot(del).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert!(!state.supervisors.read().await.contains_key("orphan"));
+    // The DELETE handler must also have called forget_node on the registry
+    // — otherwise a dashboard view would keep showing the orphan as
+    // online/reconnecting forever. Pin that explicitly so a regression that
+    // dropped only the registry-side cleanup wouldn't pass.
+    let snap = registry.status_snapshot().await;
+    assert!(
+        snap.iter().all(|s| s.node_id != "orphan"),
+        "registry should have forgotten 'orphan' after DELETE; got: {:?}",
+        snap.iter().map(|s| &s.node_id).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
