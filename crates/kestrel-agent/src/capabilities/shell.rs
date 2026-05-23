@@ -7,6 +7,13 @@ use kestrel_proto::{KestrelMessage, MsgKind, Payload};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::mpsc::Sender;
 
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Capacity of the shell-output channel between PTY reader threads and the
 /// outbound WS sender. Bounded so a stalled hub (TCP backpressure, paused
 /// client) cannot OOM the agent by letting PTY output queue without limit.
@@ -23,10 +30,26 @@ struct PtySession {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
+/// Phase 6 follow-up: per-PTY observable metadata for the
+/// WorldObserver. Tracked separately from PtySession so the observer
+/// can query a snapshot without holding the sessions Mutex while
+/// async work happens.
+pub struct ShellMeta {
+    pub alive: bool,
+    /// Bytes written into the PTY since spawn. Approximate measure of
+    /// activity; not the hub-side buffer length (which the agent
+    /// doesn't directly know).
+    pub bytes_written: u64,
+    pub last_write_unix: u64,
+}
+
 pub struct ShellManager {
     sessions: Arc<Mutex<HashMap<u32, PtySession>>>,
     next_id: Arc<Mutex<u32>>,
     event_tx: Sender<KestrelMessage>,
+    /// Per-pty observable state. Updated synchronously by spawn /
+    /// write / close. Read by the WorldObserver via meta_snapshot().
+    meta: Arc<Mutex<HashMap<u32, ShellMeta>>>,
 }
 
 impl ShellManager {
@@ -35,7 +58,17 @@ impl ShellManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
             event_tx,
+            meta: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Phase 6 follow-up: hand the meta-Arc to outside callers so
+    /// the WorldObserver can poll it without going through this
+    /// manager. Holding the Arc keeps the metadata alive past
+    /// ShellManager drop (mostly a non-issue — ShellManager outlives
+    /// the observer in practice).
+    pub fn meta_handle(&self) -> Arc<Mutex<HashMap<u32, ShellMeta>>> {
+        self.meta.clone()
     }
 
     pub fn spawn(&self, shell: Option<String>, cols: u16, rows: u16) -> anyhow::Result<u32> {
@@ -68,9 +101,18 @@ impl ShellManager {
             pty_id,
             PtySession { master: pair.master, writer, child: child.clone() },
         );
+        self.meta.lock().unwrap().insert(
+            pty_id,
+            ShellMeta {
+                alive: true,
+                bytes_written: 0,
+                last_write_unix: now_unix(),
+            },
+        );
 
         let event_tx = self.event_tx.clone();
         let sessions = self.sessions.clone();
+        let meta_for_reader = self.meta.clone();
         let reader_child = child.clone();
         let id = pty_id;
         std::thread::spawn(move || {
@@ -101,6 +143,9 @@ impl ShellManager {
                 let _ = c.wait();
             }
             sessions.lock().unwrap().remove(&id);
+            if let Some(m) = meta_for_reader.lock().unwrap().get_mut(&id) {
+                m.alive = false;
+            }
             let _ = event_tx.blocking_send(KestrelMessage {
                 stream_id: 0,
                 kind: MsgKind::Event,
@@ -117,7 +162,12 @@ impl ShellManager {
         let session = sessions
             .get_mut(&pty_id)
             .ok_or_else(|| anyhow::anyhow!("pty_id {} not found", pty_id))?;
-        session.writer.write_all(data).context("pty write_all")
+        session.writer.write_all(data).context("pty write_all")?;
+        if let Some(m) = self.meta.lock().unwrap().get_mut(&pty_id) {
+            m.bytes_written = m.bytes_written.saturating_add(data.len() as u64);
+            m.last_write_unix = now_unix();
+        }
+        Ok(())
     }
 
     pub fn resize(&self, pty_id: u32, cols: u16, rows: u16) -> anyhow::Result<()> {

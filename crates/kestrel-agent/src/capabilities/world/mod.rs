@@ -27,8 +27,10 @@ use tokio::sync::mpsc::Sender;
 
 use kestrel_proto::{
     ClipboardKind, ClipboardMetadata, DisplayInfo, FocusedApp, KestrelMessage, MousePosition,
-    MsgKind, Payload, WorldState,
+    MsgKind, Payload, ShellSession, WorldState,
 };
+use std::collections::HashMap;
+use std::sync::Mutex as StdMutex;
 use sha2::{Digest, Sha256};
 
 #[cfg(target_os = "macos")]
@@ -57,14 +59,34 @@ pub struct WorldObserver {
     /// Last `WorldState` actually sent on the wire. Held inside the
     /// `AsyncMutex` because `run()` consumes & updates it under .await.
     last_sent: AsyncMutex<WorldState>,
+    /// Phase 6 follow-up: shell-session metadata handle from the
+    /// ShellManager. Polled every tick to populate
+    /// WorldState.shells.
+    shell_meta: Arc<StdMutex<HashMap<u32, crate::capabilities::shell::ShellMeta>>>,
 }
 
 impl WorldObserver {
     pub fn new(event_tx: Sender<KestrelMessage>, displays: Vec<DisplayInfo>) -> Arc<Self> {
+        // Default constructor with no shell tracking — used by tests
+        // that don't have a ShellManager. Real callers go through
+        // with_shells.
+        Self::with_shells(
+            event_tx,
+            displays,
+            Arc::new(StdMutex::new(HashMap::new())),
+        )
+    }
+
+    pub fn with_shells(
+        event_tx: Sender<KestrelMessage>,
+        displays: Vec<DisplayInfo>,
+        shell_meta: Arc<StdMutex<HashMap<u32, crate::capabilities::shell::ShellMeta>>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             event_tx,
             displays,
             last_sent: AsyncMutex::new(WorldState::empty()),
+            shell_meta,
         })
     }
 
@@ -138,17 +160,35 @@ impl WorldObserver {
         // that handles ping/pong, which we saw add 1700ms RTT to
         // a Phase-8 regression. Run them on the blocking pool.
         let displays = self.displays.clone();
+        let shell_meta = self.shell_meta.clone();
         tokio::task::spawn_blocking(move || {
             let focused_app = current_focused_app();
             let mouse = current_mouse_position();
             let clipboard = current_clipboard_metadata();
             let screen_fingerprint = current_screen_fingerprint();
+            // Snapshot shell metadata. Sorted by pty_id so the
+            // resulting Vec compares equal across ticks when nothing
+            // changed (HashMap iteration order is non-deterministic).
+            let shells: Vec<ShellSession> = {
+                let map = shell_meta.lock().expect("shell meta poisoned");
+                let mut entries: Vec<ShellSession> = map
+                    .iter()
+                    .map(|(pty_id, m)| ShellSession {
+                        pty_id: *pty_id,
+                        alive: m.alive,
+                        buffered_bytes: m.bytes_written,
+                        last_write_unix: m.last_write_unix,
+                    })
+                    .collect();
+                entries.sort_by_key(|s| s.pty_id);
+                entries
+            };
             WorldState {
                 focused_app,
                 mouse,
                 displays,
                 clipboard,
-                shells: vec![],
+                shells,
                 screen_fingerprint,
                 last_observed_unix: SystemTime::now()
                     .duration_since(UNIX_EPOCH)

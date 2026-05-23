@@ -46,18 +46,29 @@ pub fn current_focused_app() -> Option<FocusedApp> {
                         .into_owned()
                 }
             };
+            // Best-effort window title via AX. Requires Accessibility
+            // permission; degrades to None silently if denied or if
+            // the app has no focused window.
+            let window_title = focused_window_title(pid as i32);
             Some(FocusedApp {
                 name,
                 pid: pid as u32,
-                // NSWorkspace doesn't directly expose the focused window's
-                // title. Getting it requires the AX API (see ax.rs's
-                // walker) which is much more expensive; deferred for v1.
-                // The dashboard "focused" column will show the app
-                // name; AI calls describe() if it wants the window title.
-                window_title: None,
+                window_title,
             })
         })
     }
+}
+
+/// Pull the focused window's title via AX. Best-effort: missing AX
+/// permission or no focused window → None. Uses the same
+/// `accessibility` crate AX walker already imports.
+fn focused_window_title(pid: i32) -> Option<String> {
+    use accessibility::{AXUIElement, AXUIElementAttributes};
+    let app = AXUIElement::application(pid);
+    let focused = app.focused_window().ok()?;
+    let title = focused.title().ok()?;
+    let s = title.to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
 pub fn current_mouse_position() -> Option<MousePosition> {
