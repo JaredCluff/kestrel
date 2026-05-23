@@ -151,7 +151,7 @@ async fn handle_conn(
                         })?)).await?;
                     }
                     Payload::KeyEvent { key, modifiers, action } => {
-                        if let Err(e) = input::inject_key_event(key, modifiers, action, 0, 0).await {
+                        if let Err(e) = input::inject_key_event(key, modifiers, action).await {
                             tracing::warn!("key inject error: {}", e);
                         }
                     }

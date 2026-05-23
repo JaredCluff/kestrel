@@ -35,7 +35,22 @@ pub fn spawn(
             }
 
             match transport::connect(node_cfg.address, &psk).await {
-                Ok((handle, actor_join)) => {
+                Ok((mut handle, actor_join)) => {
+                    // Verify the agent's claimed hostname matches the
+                    // configured node_id. A typo in kestrel.toml pointing one
+                    // node's address at another node's host would otherwise
+                    // silently work (PSK is shared across the fleet) and
+                    // register the agent under the wrong identity.
+                    if handle.node_id != node_cfg.node_id {
+                        tracing::warn!(
+                            "supervisor: {} reports hostname '{}'; registering under configured node_id (set the agent's --node-id to match if intentional)",
+                            node_cfg.address,
+                            handle.node_id,
+                        );
+                        // Trust the operator's config over the agent's
+                        // self-report. The registry key is the configured id.
+                        handle.node_id = node_cfg.node_id.clone();
+                    }
                     registry.register(handle).await;
                     // Wait for the actor to exit (connection closed / error).
                     let _ = actor_join.await;

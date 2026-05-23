@@ -181,7 +181,7 @@ impl KestrelMcp {
         let keys: Vec<KeyCode> = args
             .keys
             .iter()
-            .map(|s| crate::capabilities_parse::parse_key_str(s))
+            .map(|s| kestrel_proto::parse_key_str(s))
             .collect::<anyhow::Result<Vec<_>>>()
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
         self.registry

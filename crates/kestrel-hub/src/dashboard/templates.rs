@@ -49,9 +49,17 @@ pub fn nodes_rows(nodes: &[NodeStatus]) -> Markup {
                             NodeState::Offline       => span          { "offline" },
                         }
                     }
+                    // Latency column doubles as a retry-countdown when the
+                    // node is not Online (latency_ms is meaningless then).
                     td.latency {
-                        @if let Some(ms) = n.latency_ms { (ms) "ms" }
-                        @else { "—" }
+                        @if matches!(n.state, NodeState::Online) {
+                            @if let Some(ms) = n.latency_ms { (ms) "ms" }
+                            @else { "—" }
+                        } @else if let Some(retry) = n.next_retry_in {
+                            "retry " (retry.as_secs()) "s"
+                        } @else {
+                            "—"
+                        }
                     }
                 }
             }
