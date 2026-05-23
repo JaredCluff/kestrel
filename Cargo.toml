@@ -49,3 +49,4 @@ crossterm          = "0.28"
 reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 eventsource-client = "0.13"
 zeroize            = { version = "1", features = ["derive"] }
+openidconnect     = "3"

@@ -195,6 +195,7 @@ const ASSET_DASHBOARD_CSS: &[u8] = include_bytes!("../../assets/dashboard.css");
 const ASSET_HTMX_MIN_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
 const ASSET_HTMX_SSE_JS: &[u8] = include_bytes!("../../assets/htmx-sse.js");
 const ASSET_SHELL_JS: &[u8] = include_bytes!("../../assets/shell.js");
+const ASSET_WEBRTC_JS: &[u8] = include_bytes!("../../assets/webrtc.js");
 
 async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
     let (bytes, mime): (&'static [u8], &'static str) = match name.as_str() {
@@ -202,6 +203,7 @@ async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
         "htmx.min.js" => (ASSET_HTMX_MIN_JS, "application/javascript; charset=utf-8"),
         "htmx-sse.js" => (ASSET_HTMX_SSE_JS, "application/javascript; charset=utf-8"),
         "shell.js" => (ASSET_SHELL_JS, "application/javascript; charset=utf-8"),
+        "webrtc.js" => (ASSET_WEBRTC_JS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
