@@ -142,12 +142,14 @@ impl WorldObserver {
             let focused_app = current_focused_app();
             let mouse = current_mouse_position();
             let clipboard = current_clipboard_metadata();
+            let screen_fingerprint = current_screen_fingerprint();
             WorldState {
                 focused_app,
                 mouse,
                 displays,
                 clipboard,
                 shells: vec![],
+                screen_fingerprint,
                 last_observed_unix: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -223,6 +225,44 @@ fn fingerprint(bytes: &[u8]) -> String {
     hex.chars().take(16).collect()
 }
 
+/// Compute a screen fingerprint by sampling the primary display
+/// down to an 8×8 luminance grid and hashing the resulting 64 bytes.
+/// Two screens that look approximately the same hash the same. None
+/// if there's no display or capture fails.
+///
+/// Cost: one screen capture (~10ms on macOS via xcap), one
+/// downsample, one SHA-256 of 64 bytes. Cheap enough to run every
+/// 2s alongside the other observation.
+fn current_screen_fingerprint() -> Option<String> {
+    let monitors = xcap::Monitor::all().ok()?;
+    let mon = monitors.into_iter().next()?;
+    let img = mon.capture_image().ok()?;
+    // Downsample to 8x8 luminance. img is image::RgbaImage; iterate
+    // a coarse grid and accumulate luminance per cell.
+    const N: u32 = 8;
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 { return None; }
+    let mut cells = [0u32; 64];
+    let mut counts = [0u32; 64];
+    for y in 0..h {
+        let cy = (y * N / h).min(N - 1) as usize;
+        for x in 0..w {
+            let cx = (x * N / w).min(N - 1) as usize;
+            let p = img.get_pixel(x, y);
+            // ITU-R BT.601 luminance approximation.
+            let lum = (p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000;
+            let idx = cy * 8 + cx;
+            cells[idx] = cells[idx].saturating_add(lum);
+            counts[idx] = counts[idx].saturating_add(1);
+        }
+    }
+    let mut grid = [0u8; 64];
+    for i in 0..64 {
+        grid[i] = if counts[i] == 0 { 0 } else { (cells[i] / counts[i]).min(255) as u8 };
+    }
+    Some(fingerprint(&grid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +301,7 @@ mod tests {
                 displays: vec![],
                 clipboard: None,
                 shells: vec![],
+                screen_fingerprint: None,
                 last_observed_unix: 100,
             };
         }
@@ -280,6 +321,7 @@ mod tests {
             displays: vec![],
             clipboard: None,
             shells: vec![],
+            screen_fingerprint: None,
             last_observed_unix: 200, // newer
         };
         // Replicate observe_and_maybe_send's diff logic.
@@ -310,6 +352,7 @@ mod tests {
             displays: vec![],
             clipboard: None,
             shells: vec![],
+            screen_fingerprint: None,
             last_observed_unix: 300,
         };
         // last_sent starts at WorldState::empty(); any non-empty observation

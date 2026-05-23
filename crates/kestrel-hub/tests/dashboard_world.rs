@@ -56,6 +56,7 @@ fn ws_with_app(name: &str, ts: u64) -> WorldState {
         displays: vec![],
         clipboard: None,
         shells: vec![],
+        screen_fingerprint: None,
         last_observed_unix: ts,
     }
 }

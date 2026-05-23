@@ -871,6 +871,7 @@ mod tests {
             mouse: None,
             displays: vec![],
             clipboard: None,
+            screen_fingerprint: None,
             shells: vec![],
             last_observed_unix: ts,
         };
