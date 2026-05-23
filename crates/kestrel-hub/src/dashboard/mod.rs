@@ -67,6 +67,13 @@ pub struct AppState {
     /// endpoints work end-to-end so wiring against a real WebRTC
     /// stack is a contained follow-up.
     pub webrtc_sessions: crate::webrtc::SessionRegistry,
+    /// Phase 11b: optional multi-tenant policy. When `Some`, MCP
+    /// callers' bearer tokens are resolved to per-user identities
+    /// + per-op/per-node policy decisions; pending approvals queue
+    /// here. When `None`, the legacy single-token control plane
+    /// applies and policy is a no-op.
+    pub policy: Option<std::sync::Arc<crate::policy::PolicyConfig>>,
+    pub approvals: crate::policy::ApprovalRegistry,
     /// Cached screenshots per node, served via /api/screenshot/:id.
     /// Bounded staleness via the handler's TTL check; no eviction needed
     /// since the working set is bounded by the configured nodes.
@@ -115,6 +122,8 @@ impl AppState {
             session_key,
             layout,
             webrtc_sessions: crate::webrtc::SessionRegistry::new(),
+            policy: None,
+            approvals: crate::policy::ApprovalRegistry::new(),
             screenshots: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -125,6 +134,16 @@ impl AppState {
     /// Builder-style: require a Bearer token on mutation endpoints.
     pub fn with_control_token(mut self, token: String) -> Self {
         self.control_token = Some(token);
+        self
+    }
+
+    /// Phase 11b: install a multi-tenant policy. When present,
+    /// mutation endpoints resolve the caller's bearer to a user_id
+    /// + apply per-op/per-node policy. Approval gates use the
+    /// ApprovalRegistry (already wired). When absent, the legacy
+    /// single-control_token flow applies.
+    pub fn with_policy(mut self, policy: crate::policy::PolicyConfig) -> Self {
+        self.policy = Some(std::sync::Arc::new(policy));
         self
     }
 }
@@ -161,6 +180,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/webrtc/session/:id/offer", axum::routing::post(api::webrtc_post_offer))
         .route("/api/webrtc/session/:id/answer", axum::routing::post(api::webrtc_post_answer))
         .route("/api/webrtc/session/:id/ice", axum::routing::post(api::webrtc_post_ice))
+        .route("/api/approvals", get(api::approvals_list))
+        .route("/api/approvals/:id/approve", axum::routing::post(api::approvals_approve))
+        .route("/api/approvals/:id/deny", axum::routing::post(api::approvals_deny))
         .route("/shell/:node_id", get(api::shell_page))
         .route("/api/shell/ws/:node_id", get(api::shell_ws))
         .route("/assets/:name", get(asset_handler))

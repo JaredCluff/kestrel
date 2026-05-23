@@ -139,6 +139,63 @@ pub async fn events_handler(
     events_stream(registry)
 }
 
+// -------- Phase 11b approval-queue endpoints -------------------------------
+//
+// Operators sign in to the dashboard, click "Approvals" in the
+// header, see pending approval requests with metadata (who's asking,
+// what op, what node, when it expires), and click approve / deny.
+// The actor blocking inside policy.decide() unblocks immediately.
+//
+// All endpoints require auth.
+
+pub async fn approvals_list(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<Vec<crate::policy::ApprovalDto>>, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    Ok(axum::Json(state.approvals.pending().await))
+}
+
+pub async fn approvals_approve(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    if state
+        .approvals
+        .resolve(&id, crate::policy::ApprovalOutcome::Approved)
+        .await
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("approval '{}' not pending", id),
+        ))
+    }
+}
+
+pub async fn approvals_deny(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    if state
+        .approvals
+        .resolve(&id, crate::policy::ApprovalOutcome::Denied)
+        .await
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("approval '{}' not pending", id),
+        ))
+    }
+}
+
 // -------- Phase 13 WebRTC signalling endpoints -----------------------------
 //
 // Browsers driving a WebRTC session against an agent POST through
@@ -483,6 +540,7 @@ pub async fn post_node(
     axum::Json(body): axum::Json<AddNodeBody>,
 ) -> Result<(StatusCode, axum::Json<NodeStatusDto>), (StatusCode, String)> {
     check_auth(&state, &headers)?;
+    enforce_policy(&state, &headers, "node.add", &body.node_id).await?;
     let address: std::net::SocketAddr = body.address.parse()
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid address: {}", e)))?;
     let dto = add_node_impl(&state, &body.node_id, address).await?;
@@ -536,6 +594,7 @@ pub async fn delete_node(
     Path(node_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
+    enforce_policy(&state, &headers, "node.delete", &node_id).await?;
     delete_node_impl(&state, &node_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -620,6 +679,7 @@ pub async fn post_layout(
     axum::Json(body): axum::Json<LayoutBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
+    enforce_policy(&state, &headers, "layout.set", &body.node_id).await?;
     set_layout_impl(&state, &body).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -632,6 +692,7 @@ pub async fn delete_layout(
     Path(node_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
+    enforce_policy(&state, &headers, "layout.delete", &node_id).await?;
     delete_layout_impl(&state, &node_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -720,6 +781,80 @@ pub async fn logout() -> axum::response::Response {
 /// install) OR when a valid bearer/cookie credential is present.
 pub fn is_authenticated(state: &AppState, headers: &axum::http::HeaderMap) -> bool {
     check_auth(state, headers).is_ok()
+}
+
+/// Resolve the calling user from `Authorization: Bearer <token>`
+/// against the policy. Returns the matched user_id, or `None` if
+/// policy is absent (legacy single-token mode) or no user matches.
+pub fn resolve_user(state: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
+    let policy = state.policy.as_ref()?;
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))?;
+    policy.user_for_bearer(token).map(|u| u.user_id.clone())
+}
+
+/// Phase 11b: gate a mutation by policy. When `state.policy` is
+/// `None`, this is a no-op — the legacy single-token flow remains.
+/// When set, the caller's bearer is resolved to a user; the user's
+/// rules are evaluated for `op` against `node`; a `RequireApproval`
+/// decision blocks the caller on `state.approvals.request(...)` for
+/// the configured TTL.
+pub async fn enforce_policy(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    op: &str,
+    node: &str,
+) -> Result<(), (StatusCode, String)> {
+    let Some(policy) = state.policy.as_ref() else {
+        return Ok(()); // legacy mode
+    };
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer".into()))?;
+    let user = policy
+        .user_for_bearer(token)
+        .ok_or((StatusCode::UNAUTHORIZED, "unknown user".into()))?;
+    let (decision, rule) = policy.decide(user, op, node);
+    match decision {
+        crate::policy::Decision::Allow => Ok(()),
+        crate::policy::Decision::Deny => Err((
+            StatusCode::FORBIDDEN,
+            format!("policy denies {} on {}", op, node),
+        )),
+        crate::policy::Decision::NeedsApproval => {
+            let (approvers, ttl) = match rule.map(|r| &r.action) {
+                Some(crate::policy::PolicyAction::RequireApproval { approvers, ttl_secs }) => {
+                    (approvers.clone(), std::time::Duration::from_secs(*ttl_secs))
+                }
+                _ => (vec![], std::time::Duration::from_secs(60)),
+            };
+            let outcome = state
+                .approvals
+                .request(
+                    user.user_id.clone(),
+                    op.into(),
+                    node.into(),
+                    approvers,
+                    ttl,
+                )
+                .await;
+            match outcome {
+                crate::policy::ApprovalOutcome::Approved => Ok(()),
+                crate::policy::ApprovalOutcome::Denied => Err((
+                    StatusCode::FORBIDDEN,
+                    "approval denied".into(),
+                )),
+                crate::policy::ApprovalOutcome::Timeout => Err((
+                    StatusCode::FORBIDDEN,
+                    "approval timed out".into(),
+                )),
+            }
+        }
+    }
 }
 
 // -------- UI write handlers -------------------------------------------------
