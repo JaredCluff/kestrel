@@ -219,10 +219,13 @@ async fn handle_conn(
     // World-state observer: every ~2s, sample local state and push a
     // WorldUpdate event if anything changed. JoinHandle is dropped at
     // function-end (when the connection terminates) which aborts the
-    // observer task naturally.
-    let _world_observer_task = crate::capabilities::world::WorldObserver::new(
+    // observer task naturally. Threading the ShellManager's meta
+    // handle lets the observer surface per-PTY metadata in
+    // WorldState.shells.
+    let _world_observer_task = crate::capabilities::world::WorldObserver::with_shells(
         event_tx.clone(),
         world_displays,
+        shell_mgr.meta_handle(),
     )
     .spawn();
 
