@@ -22,6 +22,19 @@ pub mod templates;
 /// Hot-reload mutates this under the `config_write_lock` to keep file + memory in sync.
 pub type SupervisorMap = Arc<tokio::sync::RwLock<std::collections::HashMap<String, JoinHandle<()>>>>;
 
+/// Phase 11b OIDC in-flight state captured between /login and
+/// /callback. Contains the PKCE verifier (the secret half) + the
+/// nonce we expect in the returned ID token + the provider name to
+/// dispatch back to on callback. Short-lived: entries are removed
+/// on callback or expire after 10 minutes via a reaper task.
+#[derive(Clone)]
+pub struct OidcPending {
+    pub provider: String,
+    pub pkce_verifier: String,
+    pub nonce: String,
+    pub created_unix: u64,
+}
+
 /// One cached screenshot for a node. PNG bytes captured at
 /// `captured_at`. The dashboard's screenshot endpoint serves these
 /// directly when fresh; on cache miss / staleness it triggers a fresh
@@ -74,6 +87,15 @@ pub struct AppState {
     /// applies and policy is a no-op.
     pub policy: Option<std::sync::Arc<crate::policy::PolicyConfig>>,
     pub approvals: crate::policy::ApprovalRegistry,
+    /// Phase 11b OIDC providers (Google, GitHub, custom). Operator
+    /// registers them in kestrel-policy.toml; the
+    /// /oauth/<name>/login and /oauth/<name>/callback endpoints
+    /// drive the auth-code flow.
+    pub oidc_providers: Vec<std::sync::Arc<crate::oidc::OidcProvider>>,
+    /// In-memory storage of PKCE verifiers + nonces between
+    /// /oauth/<name>/login and /oauth/<name>/callback. Keyed by
+    /// the CSRF state we hand the provider.
+    pub oidc_pending: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, OidcPending>>>,
     /// Cached screenshots per node, served via /api/screenshot/:id.
     /// Bounded staleness via the handler's TTL check; no eviction needed
     /// since the working set is bounded by the configured nodes.
@@ -124,6 +146,10 @@ impl AppState {
             webrtc_sessions: crate::webrtc::SessionRegistry::new(),
             policy: None,
             approvals: crate::policy::ApprovalRegistry::new(),
+            oidc_providers: vec![],
+            oidc_pending: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             screenshots: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -144,6 +170,14 @@ impl AppState {
     /// single-control_token flow applies.
     pub fn with_policy(mut self, policy: crate::policy::PolicyConfig) -> Self {
         self.policy = Some(std::sync::Arc::new(policy));
+        self
+    }
+
+    /// Phase 11b: register an OIDC provider for browser-side login.
+    /// Multiple providers can be chained. Each is exposed at
+    /// `/oauth/<name>/login` and `/oauth/<name>/callback`.
+    pub fn with_oidc_provider(mut self, provider: crate::oidc::OidcProvider) -> Self {
+        self.oidc_providers.push(std::sync::Arc::new(provider));
         self
     }
 }
@@ -183,6 +217,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/approvals", get(api::approvals_list))
         .route("/api/approvals/:id/approve", axum::routing::post(api::approvals_approve))
         .route("/api/approvals/:id/deny", axum::routing::post(api::approvals_deny))
+        .route("/oauth/:provider/login", get(api::oauth_login))
+        .route("/oauth/:provider/callback", get(api::oauth_callback))
         .route("/shell/:node_id", get(api::shell_page))
         .route("/api/shell/ws/:node_id", get(api::shell_ws))
         .route("/assets/:name", get(asset_handler))
