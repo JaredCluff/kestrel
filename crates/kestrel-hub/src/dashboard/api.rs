@@ -213,7 +213,7 @@ pub async fn post_node(
     let handle = supervisor::spawn(
         crate::config::NodeConfig { node_id: body.node_id.clone(), address },
         state.registry.clone(),
-        state.psk.clone(),
+        state.master_secret.clone(),
     );
     state.supervisors.write().await.insert(body.node_id.clone(), handle);
 

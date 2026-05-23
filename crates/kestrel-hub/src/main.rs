@@ -113,6 +113,21 @@ enum Command {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
     },
+    /// Print the agent enrollment line for a configured node.
+    ///
+    /// Uses the hub's stored master_secret to HKDF-derive the node's PSK
+    /// and prints `kestrel-agent enroll --hub <bind> --node-id <id> --key <hex>`
+    /// for the operator to run on the target machine. Re-runs are
+    /// deterministic — calling this twice for the same node yields the
+    /// same line (the master_secret does not rotate).
+    Key {
+        node_id: String,
+        /// Hub host as it should appear in the printed `--hub` argument.
+        /// Defaults to 127.0.0.1; pass the LAN IP of this hub for agents
+        /// enrolling from another machine.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+    },
     /// Probe each configured node once and print reachability.
     Status {
         #[arg(long, default_value = "kestrel.toml")]
@@ -148,8 +163,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { bind, config, dashboard } => {
-            let psk = enrollment::generate_psk();
-            enrollment::store_psk(&psk)?;
+            let master_secret = enrollment::generate_master_secret();
+            enrollment::store_master_secret(&master_secret)?;
             let token = enrollment::generate_control_token();
             enrollment::store_control_token(&token)?;
             match enrollment::scaffold_hub_config(&config, &dashboard) {
@@ -159,18 +174,19 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!("config not scaffolded: {}", e);
                 }
             }
-            println!("Key generated and stored in system credential store.");
-            println!("Run this on each node machine:");
-            println!("  {}", enrollment::enrollment_command(&bind, &psk));
+            println!("Hub master secret generated and stored in system credential store.");
+            println!("Per-node PSKs are HKDF-derived from this on every connect — the master never leaves the hub.");
             println!();
-            println!("Hub control token (stored in keyring; for remote `kestrel-hub add-node --hub <url>` calls):");
+            println!("Hub control token (for remote `kestrel-hub add-node --hub <url>` calls):");
             println!("  export KESTREL_TOKEN={}", token);
             println!();
-            println!("Then on this hub: kestrel-hub add-node <id> <addr> && kestrel-hub start");
+            println!("Next: `kestrel-hub add-node <id> <addr>` registers a node and prints the");
+            println!("agent enrollment line (with the per-node PSK to give that agent).");
+            println!("You can also re-derive a node's PSK later with `kestrel-hub key <id> --bind {}`.", bind);
         }
         Command::Connect { config } => {
             let cfg = HubConfig::from_file(&config)?;
-            let psk = enrollment::load_psk()?;
+            let master_secret = enrollment::load_master_secret()?;
             // Hold every (NodeHandle, actor JoinHandle) across the ctrl_c
             // wait. Previously these were per-loop-iteration locals — they
             // dropped at end-of-iteration, closing the cmd_tx and tearing
@@ -180,6 +196,10 @@ async fn main() -> anyhow::Result<()> {
             let mut handles: Vec<(transport::NodeHandle, tokio::task::JoinHandle<()>)> =
                 Vec::with_capacity(cfg.nodes.len());
             for node in &cfg.nodes {
+                // Derive this node's PSK from the master_secret on the fly.
+                // No long-lived per-node key material lives on the hub disk
+                // or in memory beyond this scope.
+                let psk = kestrel_proto::derive_per_node_psk(&master_secret, &node.node_id);
                 let (conn, actor) = transport::connect(node.address, &psk).await?;
                 println!("connected: {} ({})", conn.node_id, conn.os_info.name);
                 handles.push((conn, actor));
@@ -195,13 +215,18 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Start { config } => {
             let cfg = HubConfig::from_file(&config)?;
-            let psk = enrollment::load_psk()?;
+            let master_secret = enrollment::load_master_secret()?;
             let registry = Arc::new(NodeRegistry::new());
 
             // Build the shared application state; supervisor handles go in `state.supervisors`.
-            // Load the control token from the keyring if it's there; absent token means
-            // legacy/no-auth mode (init upgrades this on next run).
-            let state = dashboard::AppState::new(registry.clone(), config.clone(), psk.clone());
+            // The hub stores ONLY the master_secret. Each supervisor derives its node's
+            // per-node PSK at connect time. The dashboard's add-node endpoint does the
+            // same derivation when hot-spawning a supervisor.
+            let state = dashboard::AppState::new(
+                registry.clone(),
+                config.clone(),
+                master_secret.clone(),
+            );
             let state = match enrollment::load_control_token() {
                 Ok(token) => state.with_control_token(token),
                 Err(e) => {
@@ -217,7 +242,11 @@ async fn main() -> anyhow::Result<()> {
             // Spawn one supervisor per configured node. Each supervisor handles its own
             // (re)connection lifecycle and emits status events to the registry's broadcast.
             for node in &cfg.nodes {
-                let handle = supervisor::spawn(node.clone(), registry.clone(), psk.clone());
+                let handle = supervisor::spawn(
+                    node.clone(),
+                    registry.clone(),
+                    master_secret.clone(),
+                );
                 state.supervisors.write().await.insert(node.node_id.clone(), handle);
                 println!("supervising: {} ({})", node.node_id, node.address);
             }
@@ -285,6 +314,20 @@ async fn main() -> anyhow::Result<()> {
                     println!("added '{}' at {}. start `kestrel-hub start` (or restart it) to connect.", node_id, parsed_addr);
                 }
             }
+            // If we're on the same machine as the hub keyring, derive and print
+            // the agent enrollment line. If not (e.g. CLI talking to a remote
+            // hub), print a hint to run `kestrel-hub key` on the hub host.
+            match enrollment::load_master_secret() {
+                Ok(master_secret) => {
+                    println!();
+                    println!("Run on '{}' to enroll its agent (replace <hub-ip> with this hub's LAN address):", node_id);
+                    println!("  {}", enrollment::enrollment_command("<hub-ip>", &node_id, &master_secret));
+                }
+                Err(_) => {
+                    println!();
+                    println!("To get the agent enrollment line, run `kestrel-hub key {}` on the hub host.", node_id);
+                }
+            }
         }
         Command::ListNodes { config } => {
             let cfg = HubConfig::from_file(&config)?;
@@ -334,13 +377,24 @@ async fn main() -> anyhow::Result<()> {
             kestrel_hub::config::save_doc(&config, &doc)?;
             println!("layout cleared for '{}'.", node_id);
         }
+        Command::Key { node_id, bind } => {
+            // Re-derive (deterministically) the per-node PSK from the hub's
+            // master_secret and print the enrollment line. Useful when the
+            // operator needs to re-onboard an agent without rotating the
+            // whole fleet.
+            let master_secret = enrollment::load_master_secret()?;
+            println!("Run on '{}'\u{2019}s machine to enroll its agent:", node_id);
+            println!("  {}", enrollment::enrollment_command(&bind, &node_id, &master_secret));
+        }
         Command::Status { config, timeout } => {
             let cfg = HubConfig::from_file(&config)?;
-            let psk = enrollment::load_psk()?;
+            let master_secret = enrollment::load_master_secret()?;
             if cfg.nodes.is_empty() {
                 println!("(no nodes configured)");
             } else {
                 for node in &cfg.nodes {
+                    // Derive per-node PSK on the fly so probe_node can use it.
+                    let psk = kestrel_proto::derive_per_node_psk(&master_secret, &node.node_id);
                     let probe = kestrel_hub::status::probe_node(
                         node,
                         &psk,
@@ -365,7 +419,8 @@ async fn main() -> anyhow::Result<()> {
             let will_delete_config = !keep_config && std::path::Path::new(&config).exists();
             if !yes {
                 println!("`kestrel-hub unenroll` would:");
-                println!("  - clear keyring entry (kestrel, psk)");
+                println!("  - clear keyring entry (kestrel, master_secret)");
+                println!("  - clear keyring entry (kestrel, psk) (legacy, if present)");
                 println!("  - clear keyring entry (kestrel, control_token)");
                 if will_delete_config {
                     println!("  - delete {}", config);

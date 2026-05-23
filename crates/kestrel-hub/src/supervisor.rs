@@ -17,12 +17,19 @@ fn backoff_for(attempt: u32) -> Duration {
 ///
 /// Loop: connect → register → wait for actor exit → mark disconnected → sleep(backoff) → retry.
 /// The supervisor never exits on its own; aborting the returned `JoinHandle` is the only way to stop it.
+///
+/// `master_secret` is the hub's HKDF input; the actual PSK used on each
+/// connect is `derive_per_node_psk(master_secret, node_cfg.node_id)` so
+/// rotating one node never affects another.
 pub fn spawn(
     node_cfg: NodeConfig,
     registry: Arc<NodeRegistry>,
-    psk: Vec<u8>,
+    master_secret: Vec<u8>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // Derive once per supervisor lifetime — node_id and master are both
+        // fixed for the lifetime of this task. Reconnects use the same PSK.
+        let psk = kestrel_proto::derive_per_node_psk(&master_secret, &node_cfg.node_id);
         let mut attempt: u32 = 0;
         loop {
             if attempt > 0 {
