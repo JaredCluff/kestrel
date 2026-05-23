@@ -243,3 +243,129 @@ async fn delete_layout_without_auth_returns_401() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// -------- Browser form-driven layout UI -----------------------------------
+
+#[tokio::test]
+async fn ui_set_layout_with_bearer_redirects_home_and_updates_live_state() {
+    // The /ui/layout form handler accepts either bearer or cookie
+    // auth — using bearer here keeps the test simple.
+    let (app, state, _path) = build_app();
+    let body = "node_id=alpha&col=2&row=0";
+    let resp = app
+        .oneshot(
+            bearer(Request::builder().method("POST").uri("/ui/layout"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        resp.status(),
+        StatusCode::SEE_OTHER | StatusCode::FOUND
+    ));
+    assert_eq!(
+        resp.headers().get(axum::http::header::LOCATION).unwrap().to_str().unwrap(),
+        "/"
+    );
+    let layout = state.layout.read().await;
+    assert_eq!(layout.len(), 1);
+    assert_eq!(layout[0].node_id, "alpha");
+    assert_eq!(layout[0].col, 2);
+    assert_eq!(layout[0].row, 0);
+}
+
+#[tokio::test]
+async fn ui_unset_layout_with_bearer_redirects_home_and_removes_entry() {
+    let (app, state, _path) = build_app();
+    // Seed an entry first.
+    let _ = app
+        .clone()
+        .oneshot(
+            bearer(Request::builder().method("POST").uri("/api/layout"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"node_id": "alpha", "col": 1, "row": 0}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(
+            bearer(Request::builder()
+                .method("POST")
+                .uri("/ui/layout/alpha/delete"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        resp.status(),
+        StatusCode::SEE_OTHER | StatusCode::FOUND
+    ));
+    let layout = state.layout.read().await;
+    assert!(layout.is_empty(), "layout should be empty after UI unset");
+}
+
+#[tokio::test]
+async fn ui_set_layout_without_auth_redirects_to_login() {
+    let (app, _, _) = build_app();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/layout")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("node_id=x&col=0&row=0"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        resp.status(),
+        StatusCode::SEE_OTHER | StatusCode::FOUND
+    ));
+    assert_eq!(
+        resp.headers().get(axum::http::header::LOCATION).unwrap().to_str().unwrap(),
+        "/login"
+    );
+}
+
+#[tokio::test]
+async fn index_renders_layout_section_when_entries_exist() {
+    // After setting a layout entry, the dashboard's HTML root should
+    // include a Layout section showing it. This pins that the index
+    // handler threads SharedLayout into the template.
+    let (app, _, _) = build_app();
+    let _ = app
+        .clone()
+        .oneshot(
+            bearer(Request::builder().method("POST").uri("/api/layout"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"node_id": "renderme", "col": 7, "row": 11}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 32_768).await.unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("Layout"), "missing Layout subhead in:\n{}", html);
+    assert!(html.contains("renderme"), "missing layout entry node_id");
+    assert!(html.contains("(7, 11)"), "missing layout coords");
+}

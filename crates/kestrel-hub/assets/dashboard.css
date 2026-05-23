@@ -182,3 +182,52 @@ form.addnode input[type="text"]:focus {
     outline: none;
     border-color: var(--accent);
 }
+
+/* Layout grid section, mirrors the nodes table styling. */
+header.subhead {
+    display: flex;
+    gap: 12px;
+    margin-top: 48px;
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+}
+header.subhead .count {
+    color: var(--muted);
+}
+
+table.layout {
+    margin-top: 12px;
+    border-collapse: collapse;
+    width: 100%;
+}
+table.layout td {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--divider);
+    font-size: 14px;
+}
+table.layout td.coord {
+    color: var(--muted);
+    width: 120px;
+}
+
+form.addlayout {
+    margin-top: 16px;
+    gap: 8px;
+}
+form.addlayout input[type="text"],
+form.addlayout input[type="number"] {
+    padding: 8px 12px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--divider);
+    font: inherit;
+}
+form.addlayout input[type="number"] {
+    width: 80px;
+}
+form.addlayout input:focus {
+    outline: none;
+    border-color: var(--accent);
+}

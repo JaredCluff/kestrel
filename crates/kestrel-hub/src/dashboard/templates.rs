@@ -1,6 +1,7 @@
 // crates/kestrel-hub/src/dashboard/templates.rs
 use maud::{DOCTYPE, Markup, html};
 
+use crate::config::NodeLayout;
 use crate::events::{NodeState, NodeStatus};
 
 /// Full dashboard page. `authed` controls whether write controls (Add /
@@ -9,7 +10,14 @@ use crate::events::{NodeState, NodeStatus};
 /// sign-out link in the header always renders and points the other way
 /// from the current state.
 pub fn page(nodes: &[NodeStatus], authed: bool) -> Markup {
-    page_inner(nodes, authed, None)
+    page_inner(nodes, &[], authed, None)
+}
+
+/// Variant of `page` that also renders the KVM grid layout column +
+/// the layout-set form. Used by the index handler which has access to
+/// the live SharedLayout.
+pub fn page_with_layout(nodes: &[NodeStatus], layout: &[NodeLayout], authed: bool) -> Markup {
+    page_inner(nodes, layout, authed, None)
 }
 
 /// Same page, but with an inline error message banner above the table.
@@ -17,10 +25,15 @@ pub fn page(nodes: &[NodeStatus], authed: bool) -> Markup {
 /// etc.) so the operator stays on the dashboard with feedback rather
 /// than being bounced to a separate error page.
 pub fn page_with_error(nodes: &[NodeStatus], authed: bool, error: &str) -> Markup {
-    page_inner(nodes, authed, Some(error))
+    page_inner(nodes, &[], authed, Some(error))
 }
 
-fn page_inner(nodes: &[NodeStatus], authed: bool, error: Option<&str>) -> Markup {
+fn page_inner(
+    nodes: &[NodeStatus],
+    layout: &[NodeLayout],
+    authed: bool,
+    error: Option<&str>,
+) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -67,6 +80,55 @@ fn page_inner(nodes: &[NodeStatus], authed: bool, error: Option<&str>) -> Markup
                             input type="text" name="node_id" placeholder="node id" required;
                             input type="text" name="address" placeholder="host:port" required;
                             button type="submit" { "Add node" }
+                        }
+                    }
+
+                    // KVM layout grid. Shows the current (col, row)
+                    // entries from the SharedLayout. When authed, an
+                    // operator can set/move/remove entries via the form
+                    // below — applies live via /api/layout.
+                    @if !layout.is_empty() || authed {
+                        header.subhead {
+                            span { "Layout" }
+                            span.count { (layout.len()) }
+                        }
+                        @if !layout.is_empty() {
+                            table.layout {
+                                tbody {
+                                    @for entry in layout {
+                                        tr {
+                                            td.id { (entry.node_id) }
+                                            td.coord { "(" (entry.col) ", " (entry.row) ")" }
+                                            @if authed {
+                                                td.actions {
+                                                    form
+                                                        method="post"
+                                                        action=(format!("/ui/layout/{}/delete", entry.node_id))
+                                                        onsubmit=(format!(
+                                                            "return confirm('Remove layout entry for {}?');",
+                                                            entry.node_id
+                                                        ))
+                                                    {
+                                                        button.linkish type="submit" { "Remove" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        @if authed {
+                            // Set/move a layout entry. Idempotent on the
+                            // server — re-posting the same node_id moves
+                            // it; the dashboard ergonomics match: same
+                            // form does both set and move.
+                            form.addlayout method="post" action="/ui/layout" {
+                                input type="text" name="node_id" placeholder="node id" required;
+                                input type="number" name="col" placeholder="col" required;
+                                input type="number" name="row" placeholder="row" required;
+                                button type="submit" { "Set layout" }
+                            }
                         }
                     }
                 }
