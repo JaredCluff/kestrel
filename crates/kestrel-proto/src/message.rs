@@ -248,4 +248,148 @@ mod tests {
         };
         assert_eq!(roundtrip(&msg), msg);
     }
+
+    // The variants below were uncovered by Pass 5; without roundtrip tests,
+    // a future reorder/insert of `Payload` variants could silently change a
+    // discriminant and break wire-compat without any test failing.
+
+    #[test]
+    fn roundtrip_pong() {
+        let msg = KestrelMessage {
+            stream_id: 9,
+            kind: MsgKind::Response,
+            payload: Payload::Pong,
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_mouse_button() {
+        let msg = KestrelMessage {
+            stream_id: 11,
+            kind: MsgKind::Request,
+            payload: Payload::MouseButton {
+                button: Button::Right,
+                action: PressRelease::Click,
+                x: 0.75,
+                y: 0.25,
+            },
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_scroll() {
+        let msg = KestrelMessage {
+            stream_id: 12,
+            kind: MsgKind::Request,
+            payload: Payload::Scroll { dx: -1.5, dy: 3.0 },
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_describe_req_resp() {
+        let req = KestrelMessage {
+            stream_id: 13,
+            kind: MsgKind::Request,
+            payload: Payload::DescribeReq { display: 0 },
+        };
+        let resp = KestrelMessage {
+            stream_id: 13,
+            kind: MsgKind::Response,
+            payload: Payload::DescribeResp { tree: AccessibilityNode::unavailable() },
+        };
+        for msg in [req, resp] {
+            assert_eq!(roundtrip(&msg), msg);
+        }
+    }
+
+    #[test]
+    fn roundtrip_clipboard_read_req() {
+        let msg = KestrelMessage {
+            stream_id: 14,
+            kind: MsgKind::Request,
+            payload: Payload::ClipboardReadReq,
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_clipboard_write_req_ack() {
+        let req = KestrelMessage {
+            stream_id: 15,
+            kind: MsgKind::Request,
+            payload: Payload::ClipboardWriteReq {
+                content: ClipboardContent::Text("paste-me".into()),
+            },
+        };
+        let ack = KestrelMessage {
+            stream_id: 15,
+            kind: MsgKind::Response,
+            payload: Payload::ClipboardWriteAck,
+        };
+        for msg in [req, ack] {
+            assert_eq!(roundtrip(&msg), msg);
+        }
+    }
+
+    #[test]
+    fn roundtrip_clipboard_image() {
+        let msg = KestrelMessage {
+            stream_id: 16,
+            kind: MsgKind::Response,
+            payload: Payload::ClipboardReadResp {
+                content: ClipboardContent::Image {
+                    png_bytes: vec![137, 80, 78, 71, 13, 10, 26, 10],
+                    width: 800,
+                    height: 600,
+                },
+            },
+        };
+        assert_eq!(roundtrip(&msg), msg);
+    }
+
+    #[test]
+    fn roundtrip_shell_spawn_and_spawned() {
+        let spawn = KestrelMessage {
+            stream_id: 17,
+            kind: MsgKind::Request,
+            payload: Payload::ShellSpawn {
+                shell: Some("/bin/zsh".into()),
+                cols: 120,
+                rows: 40,
+            },
+        };
+        let spawned = KestrelMessage {
+            stream_id: 17,
+            kind: MsgKind::Response,
+            payload: Payload::ShellSpawned { pty_id: 42 },
+        };
+        for msg in [spawn, spawned] {
+            assert_eq!(roundtrip(&msg), msg);
+        }
+    }
+
+    #[test]
+    fn roundtrip_shell_write_resize_close() {
+        let write = KestrelMessage {
+            stream_id: 18,
+            kind: MsgKind::Request,
+            payload: Payload::ShellWrite { pty_id: 42, data: b"echo hi\n".to_vec() },
+        };
+        let resize = KestrelMessage {
+            stream_id: 19,
+            kind: MsgKind::Request,
+            payload: Payload::ShellResize { pty_id: 42, cols: 80, rows: 24 },
+        };
+        let close = KestrelMessage {
+            stream_id: 20,
+            kind: MsgKind::Request,
+            payload: Payload::ShellClose { pty_id: 42 },
+        };
+        for msg in [write, resize, close] {
+            assert_eq!(roundtrip(&msg), msg);
+        }
+    }
 }

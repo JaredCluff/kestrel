@@ -54,6 +54,27 @@ fn unenroll_yes_deletes_config_file() {
 }
 
 #[test]
+fn unenroll_yes_with_missing_config_is_a_no_op_not_an_error() {
+    // Agent-side mirror of the hub test — missing-file branch must be a
+    // clean no-op.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kestrel.toml");
+    assert!(!path.exists());
+
+    let out = Command::new(bin())
+        .args(["unenroll", "--config", path.to_str().unwrap(), "--yes"])
+        .output()
+        .expect("failed to spawn kestrel-agent");
+
+    assert!(
+        out.status.success(),
+        "expected exit 0 on missing-file unenroll; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!path.exists());
+}
+
+#[test]
 fn unenroll_yes_keep_config_preserves_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = starter_toml(dir.path());
