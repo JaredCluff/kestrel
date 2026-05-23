@@ -12,3 +12,4 @@ pub mod status;
 pub mod supervisor;
 pub mod transport;
 pub mod tui;
+pub mod workflow;

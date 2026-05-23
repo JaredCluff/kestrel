@@ -660,6 +660,32 @@ impl KestrelMcp {
         })
         .await
     }
+
+    // ── Phase 9 declarative workflow choreography ─────────────────────────
+
+    #[tool(description = "Run a declarative cross-machine workflow. `steps` is a JSON array; each step has `name`, target (`node` for explicit id OR `needs` for capability-routed lookup), `op` (\"shell_run\" | \"screenshot\" | \"world_state\" | \"describe\"), op-specific `args`, and optional `on_error` (\"continue\" | \"fail\"; default fail). Later steps' `args` strings can reference earlier captures via `${step_name.output}` substitution. Optional `timeout_secs` caps the whole workflow (default 300). Returns a JSON object with per-step results, total duration, and overall status (ok | partial_error | aborted | timed_out). Use this when an AI's task naturally spans multiple machines or steps — much cheaper than chaining individual tool calls.")]
+    async fn workflow_run(
+        &self,
+        Parameters(args): Parameters<WorkflowArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let summary = format!("steps={}", args.steps.len());
+        self.audit_call("workflow_run", "*", summary, || async move {
+            let timeout = std::time::Duration::from_secs(args.timeout_secs.unwrap_or(300));
+            let result = crate::workflow::run(&self.registry, args.steps, timeout).await;
+            let json = serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e));
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
+        .await
+    }
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorkflowArgs {
+    pub steps: Vec<crate::workflow::WorkflowStep>,
+    /// Whole-workflow timeout in seconds. Default 300 (5 minutes).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[tool_handler]
