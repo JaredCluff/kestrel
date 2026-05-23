@@ -19,16 +19,16 @@ The thesis: **Kestrel becomes 10× more valuable when the abstractions match how
 
 Listed in **build order**. Ordering favors foundations first; later phases depend on earlier ones.
 
-| # | Phase | Why it matters | Hard? |
-|---|---|---|---|
-| 6 | **Persistent World State + Diffs** | The AI stops polling and starts reasoning about change. Foundational for everything else. | Medium |
-| 7 | **Async Long-Running Jobs** | The AI can fire off a 30-minute build and do other things. Foundational for workflows. | Medium |
-| 8 | **Capability Advertisement + Smart Routing** | The AI asks for a *capability* (GPU, display, sudo) instead of hardcoding `node_id`s. | Medium |
-| 9 | **Workflow Choreography** | The AI declares a cross-machine flow; the hub orchestrates. Unique-position payoff. | Large |
-| 10 | **Sandbox Provisioning** | The AI spawns a throwaway VM, runs risky work, tears it down. Risk-tolerance upgrade. | Large |
-| 11 | **Multi-Tenant Identity + Approval Gates** | Per-user OIDC, per-action policy, dashboard-mediated approvals. Team-scale unlock. | Large |
-| 12 | **Plugin Model for Capabilities** | Vendors ship Kestrel-compatible apps. Ecosystem expansion. | Large |
-| 13 | **WebRTC Real-Time Streaming** | Sub-second interactive screen + input. Fundamentally different UX. | Large |
+| # | Phase | Status |
+|---|---|---|
+| 6 | **Persistent World State + Diffs** | ✅ shipped (PRs #47–#51) |
+| 7 | **Async Long-Running Jobs** | ✅ shipped (PR #52) |
+| 8 | **Capability Advertisement + Smart Routing** | ✅ shipped (PR #53) |
+| 9 | **Workflow Choreography** | ✅ shipped (PR #54) |
+| 10 | **Sandbox Provisioning** | ✅ shipped registry + lifecycle (PR #55); backend bodies are stubs awaiting hardware verification |
+| 11 | **Multi-Tenant Identity + Approval Gates** | ✅ shipped data model + approval primitives (PR #56); check_auth wiring + dashboard UI = Phase 11b |
+| 12 | **Plugin Model for Capabilities** | ✅ shipped agent-side host (PR #57); hub-MCP surfacing = Phase 12b |
+| 13 | **WebRTC Real-Time Streaming** | ✅ shipped signalling layer; RTP pipeline = Phase 13b |
 
 Each phase ships in multiple PRs and is independently mergeable. Phases 6 and 7 are MUST-DO foundations; later phases assume them.
 

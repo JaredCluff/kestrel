@@ -61,6 +61,12 @@ pub struct AppState {
     /// memory views stay synchronized. Hot-reload — no hub restart
     /// needed to add or move a node on the grid.
     pub layout: crate::kvm::SharedLayout,
+    /// Phase 13: WebRTC signalling registry. Tracks active streaming
+    /// sessions between dashboard browsers and agents. The actual
+    /// SFU pipeline is TODO; this surface lets the signalling
+    /// endpoints work end-to-end so wiring against a real WebRTC
+    /// stack is a contained follow-up.
+    pub webrtc_sessions: crate::webrtc::SessionRegistry,
     /// Cached screenshots per node, served via /api/screenshot/:id.
     /// Bounded staleness via the handler's TTL check; no eviction needed
     /// since the working set is bounded by the configured nodes.
@@ -108,6 +114,7 @@ impl AppState {
             master_secret,
             session_key,
             layout,
+            webrtc_sessions: crate::webrtc::SessionRegistry::new(),
             screenshots: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -149,6 +156,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(api::events_handler))
         .route("/api/screenshot/:node_id", get(api::screenshot_handler))
         .route("/api/world/:node_id", get(api::world_handler))
+        .route("/api/webrtc/session", axum::routing::post(api::webrtc_create_session))
+        .route("/api/webrtc/session/:id", get(api::webrtc_get_session))
+        .route("/api/webrtc/session/:id/offer", axum::routing::post(api::webrtc_post_offer))
+        .route("/api/webrtc/session/:id/answer", axum::routing::post(api::webrtc_post_answer))
+        .route("/api/webrtc/session/:id/ice", axum::routing::post(api::webrtc_post_ice))
         .route("/shell/:node_id", get(api::shell_page))
         .route("/api/shell/ws/:node_id", get(api::shell_ws))
         .route("/assets/:name", get(asset_handler))
