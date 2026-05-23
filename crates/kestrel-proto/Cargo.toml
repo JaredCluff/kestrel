@@ -9,3 +9,4 @@ bincode = { workspace = true }
 anyhow  = { workspace = true }
 hmac    = "0.12"
 sha2    = "0.10"
+hkdf    = "0.12"
