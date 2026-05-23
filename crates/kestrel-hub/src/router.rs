@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use kestrel_proto::{AccessibilityNode, Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect};
+use kestrel_proto::{AccessibilityNode, Button, ClipboardContent, KeyCode, Modifiers, OsInfo, PressRelease, Rect, WorldState};
 use tokio::sync::RwLock;
 
 use crate::events::{NodeEvent, NodeState, NodeStatus};
@@ -18,6 +18,12 @@ pub struct NodeInfo {
 pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeHandle>>>,
     status: Arc<RwLock<HashMap<String, NodeStatus>>>,
+    /// Phase 6: per-node world-state cache. Populated by
+    /// `observe_world_update` when the agent's WorldObserver pushes
+    /// a `Payload::WorldUpdate` event; queried by `world_state_for`
+    /// and `world_diff_since` to back the MCP tools and the
+    /// dashboard's /api/world endpoint.
+    world: Arc<RwLock<HashMap<String, WorldState>>>,
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
 }
 
@@ -33,7 +39,63 @@ impl NodeRegistry {
         NodeRegistry {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(HashMap::new())),
+            world: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+        }
+    }
+
+    /// Phase 6: ingest a WorldUpdate from an agent. No-op when the new
+    /// state is byte-identical to what's already cached (defense in
+    /// depth on top of the agent's own change-detection check).
+    /// Otherwise updates the cache and broadcasts a `WorldChanged`
+    /// event so SSE subscribers and the dashboard react immediately.
+    pub async fn observe_world_update(&self, node_id: &str, state: WorldState) {
+        // De-dupe against the cached state. Compare all fields except
+        // `last_observed_unix` — that always changes per tick, and
+        // we don't want a re-broadcast on every observation when
+        // nothing material changed.
+        {
+            let cache = self.world.read().await;
+            if let Some(prev) = cache.get(node_id) {
+                let mut probe = state.clone();
+                probe.last_observed_unix = prev.last_observed_unix;
+                if probe == *prev {
+                    return;
+                }
+            }
+        }
+        // Update the cache; broadcast event.
+        {
+            let mut cache = self.world.write().await;
+            cache.insert(node_id.to_string(), state.clone());
+        }
+        let _ = self.event_tx.send(NodeEvent::WorldChanged {
+            node_id: node_id.to_string(),
+            state,
+        });
+    }
+
+    /// Phase 6: read the most recent world state for `node_id`.
+    /// Returns `None` when no observation has arrived yet (fresh
+    /// connect; agent's first WorldObserver tick hasn't completed).
+    pub async fn world_state_for(&self, node_id: &str) -> Option<WorldState> {
+        self.world.read().await.get(node_id).cloned()
+    }
+
+    /// Phase 6: return the cached world state IFF it was observed
+    /// after `since_unix_secs`; else None. For v1 we return the full
+    /// state on any change; field-granular diffs are a follow-up.
+    pub async fn world_diff_since(
+        &self,
+        node_id: &str,
+        since_unix_secs: u64,
+    ) -> Option<WorldState> {
+        let cache = self.world.read().await;
+        let state = cache.get(node_id)?;
+        if state.last_observed_unix > since_unix_secs {
+            Some(state.clone())
+        } else {
+            None
         }
     }
 
@@ -368,5 +430,90 @@ mod tests {
         let r = NodeRegistry::new();
         r.forget_node("ghost").await; // no panic; just emits an event with attempt=0
         r.forget_node("ghost").await; // still no panic
+    }
+
+    // -------- Phase 6 world state tests --------
+
+    fn ws_with_app(name: &str, ts: u64) -> WorldState {
+        WorldState {
+            focused_app: Some(kestrel_proto::FocusedApp {
+                name: name.into(),
+                pid: 1,
+                window_title: None,
+            }),
+            mouse: None,
+            displays: vec![],
+            clipboard: None,
+            shells: vec![],
+            last_observed_unix: ts,
+        }
+    }
+
+    #[tokio::test]
+    async fn world_state_for_unknown_node_is_none() {
+        let r = NodeRegistry::new();
+        assert!(r.world_state_for("ghost").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn observe_world_update_caches_and_broadcasts() {
+        let r = NodeRegistry::new();
+        let mut rx = r.subscribe();
+        r.observe_world_update("alpha", ws_with_app("Safari", 100)).await;
+        // Cache populated.
+        let cached = r.world_state_for("alpha").await.unwrap();
+        assert_eq!(cached.focused_app.unwrap().name, "Safari");
+        // Event broadcast.
+        let evt = rx.recv().await.unwrap();
+        match evt {
+            NodeEvent::WorldChanged { node_id, state } => {
+                assert_eq!(node_id, "alpha");
+                assert_eq!(state.focused_app.unwrap().name, "Safari");
+            }
+            other => panic!("expected WorldChanged, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_world_update_is_noop_when_only_timestamp_changes() {
+        // The hub's defensive de-dupe must not re-broadcast when the
+        // agent's observer emits an identical-except-for-timestamp
+        // state (this shouldn't happen — the agent already drops
+        // unchanged states — but defense in depth matters).
+        let r = NodeRegistry::new();
+        let mut rx = r.subscribe();
+        r.observe_world_update("alpha", ws_with_app("Safari", 100)).await;
+        let _ = rx.recv().await; // consume first event
+
+        r.observe_world_update("alpha", ws_with_app("Safari", 200)).await;
+        // No new event on the channel within a short window. recv()
+        // would block forever if nothing arrives; use try_recv.
+        assert!(rx.try_recv().is_err(), "no new event expected");
+    }
+
+    #[tokio::test]
+    async fn observe_world_update_rebroadcasts_on_real_change() {
+        let r = NodeRegistry::new();
+        let mut rx = r.subscribe();
+        r.observe_world_update("alpha", ws_with_app("Safari", 100)).await;
+        let _ = rx.recv().await;
+
+        r.observe_world_update("alpha", ws_with_app("Mail", 200)).await;
+        let evt = rx.recv().await.unwrap();
+        match evt {
+            NodeEvent::WorldChanged { state, .. } => {
+                assert_eq!(state.focused_app.unwrap().name, "Mail");
+            }
+            other => panic!("expected WorldChanged, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn world_diff_since_returns_state_when_newer() {
+        let r = NodeRegistry::new();
+        r.observe_world_update("alpha", ws_with_app("Safari", 100)).await;
+        assert!(r.world_diff_since("alpha", 50).await.is_some());
+        assert!(r.world_diff_since("alpha", 100).await.is_none());
+        assert!(r.world_diff_since("alpha", 200).await.is_none());
     }
 }

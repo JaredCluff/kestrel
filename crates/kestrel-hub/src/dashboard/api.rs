@@ -69,6 +69,14 @@ pub enum NodeEventDto {
         node_id: String,
         attempt: u32,
     },
+    /// Phase 6: agent's WorldObserver reported a state change.
+    /// Carries only the node_id; clients GET /api/world/:id (or
+    /// call the world_state MCP tool) for the new state. Keeps SSE
+    /// payloads small and avoids re-encoding the WorldState into
+    /// every SSE frame.
+    WorldChanged {
+        node_id: String,
+    },
 }
 
 impl From<&NodeEvent> for NodeEventDto {
@@ -90,6 +98,9 @@ impl From<&NodeEvent> for NodeEventDto {
             NodeEvent::Reconnecting { node_id, attempt } => NodeEventDto::Reconnecting {
                 node_id: node_id.clone(),
                 attempt: *attempt,
+            },
+            NodeEvent::WorldChanged { node_id, .. } => NodeEventDto::WorldChanged {
+                node_id: node_id.clone(),
             },
         }
     }

@@ -1,5 +1,5 @@
 // crates/kestrel-hub/src/events.rs
-use kestrel_proto::OsInfo;
+use kestrel_proto::{OsInfo, WorldState};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone)]
@@ -7,6 +7,10 @@ pub enum NodeEvent {
     Connected { node_id: String, os: OsInfo },
     Disconnected { node_id: String, attempt: u32, next_retry_in: Duration },
     Reconnecting { node_id: String, attempt: u32 },
+    /// Phase 6: agent's WorldObserver reported a state change. The
+    /// new state is included so SSE subscribers can react without
+    /// re-querying the registry.
+    WorldChanged { node_id: String, state: WorldState },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
