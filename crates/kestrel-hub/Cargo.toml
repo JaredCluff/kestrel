@@ -32,6 +32,7 @@ xcap       = { workspace = true }
 axum         = { workspace = true }
 axum-server  = { workspace = true }
 rustls_23    = { workspace = true }
+async-trait  = "0.1"
 tokio-stream = { workspace = true }
 maud         = { workspace = true }
 futures      = { workspace = true }

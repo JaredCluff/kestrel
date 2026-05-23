@@ -136,6 +136,10 @@ pub struct KestrelMcp {
     /// Phase 7: shared job registry. Created here so every
     /// MCP-invocation-routed handler can dispatch async jobs.
     jobs: crate::jobs::JobRegistry,
+    /// Phase 10: shared sandbox registry. Single instance per hub,
+    /// shared across every MCP call. Reaper task is spawned by
+    /// `kestrel-hub start`, not here.
+    sandboxes: crate::sandbox::SandboxRegistry,
     audit: crate::audit::AuditLogger,
     tool_router: ToolRouter<KestrelMcp>,
 }
@@ -150,9 +154,11 @@ impl KestrelMcp {
     /// a file-backed logger here; tests use [`AuditLogger::disabled`].
     pub fn with_audit(registry: Arc<NodeRegistry>, audit: crate::audit::AuditLogger) -> Self {
         let jobs = crate::jobs::JobRegistry::new(registry.clone());
+        let sandboxes = crate::sandbox::SandboxRegistry::new();
         KestrelMcp {
             registry,
             jobs,
+            sandboxes,
             audit,
             tool_router: Self::tool_router(),
         }
@@ -678,6 +684,48 @@ impl KestrelMcp {
         })
         .await
     }
+
+    // ── Phase 10 ephemeral sandboxes ──────────────────────────────────────
+
+    #[tool(description = "Spawn a fresh VM sandbox with the agent pre-installed. Returns a sandbox_id (which is also the resulting node_id once the VM boots). Backend chosen by host OS: macOS uses Tart, Linux uses Lima, Windows uses Hyper-V. `image` is backend-specific (e.g. \"ghcr.io/cirruslabs/ubuntu:24.04\" for Tart). `ttl_secs` (default 3600) caps the VM's lifetime — the hub auto-tears-down at expiry. Use this when an AI needs to take a risky action it shouldn't run on a real machine. NOTE: as of this release the provisioning bodies are stubs; the registry + auto-teardown are wired, the backend subprocesses need follow-up work on real hardware.")]
+    async fn sandbox_spawn(
+        &self,
+        Parameters(args): Parameters<SandboxSpawnArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let summary = format!("image={}", args.image);
+        self.audit_call("sandbox_spawn", "*", summary, || async move {
+            let ttl = args.ttl_secs.unwrap_or(3600);
+            match self.sandboxes.spawn(&args.image, ttl).await {
+                Ok(id) => Ok(CallToolResult::success(vec![Content::text(id)])),
+                Err(e) => Err(McpError::internal_error(format!("sandbox_spawn: {}", e), None)),
+            }
+        })
+        .await
+    }
+
+    #[tool(description = "Destroy a sandbox VM and clean up its backend resources. Idempotent — destroying an already-destroyed sandbox returns true. Returns false if the sandbox_id is unknown.")]
+    async fn sandbox_destroy(
+        &self,
+        Parameters(args): Parameters<SandboxIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = args.sandbox_id.clone();
+        self.audit_call("sandbox_destroy", "*", id.clone(), || async move {
+            let destroyed = self.sandboxes.destroy(&args.sandbox_id).await;
+            Ok(CallToolResult::success(vec![Content::text(destroyed.to_string())]))
+        })
+        .await
+    }
+
+    #[tool(description = "List all known sandboxes (provisioning, ready, destroyed, failed). Returns a JSON array sorted by sandbox_id.")]
+    async fn sandbox_list(&self) -> Result<CallToolResult, McpError> {
+        self.audit_call("sandbox_list", "*", String::new(), || async {
+            let list = self.sandboxes.list().await;
+            let json = serde_json::to_string_pretty(&list)
+                .unwrap_or_else(|e| format!("[\"error: {}\"]", e));
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
+        .await
+    }
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -686,6 +734,23 @@ pub struct WorkflowArgs {
     /// Whole-workflow timeout in seconds. Default 300 (5 minutes).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SandboxSpawnArgs {
+    /// Backend-specific image identifier. macOS/Tart: a registered
+    /// Tart image name like "ghcr.io/cirruslabs/ubuntu:24.04". Linux/
+    /// Lima: a Lima template name. Windows/HyperV: a quick-create
+    /// image id.
+    pub image: String,
+    /// Seconds until auto-teardown. Default 3600 (1 hour).
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SandboxIdArgs {
+    pub sandbox_id: String,
 }
 
 #[tool_handler]
