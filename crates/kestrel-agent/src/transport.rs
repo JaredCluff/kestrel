@@ -14,6 +14,28 @@ use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{accept_async_with_config, tungstenite::Message, tungstenite::protocol::WebSocketConfig};
 
 use crate::capabilities::{clipboard, input, screen, shell, shell::ShellManager};
+
+/// Coarse runtime check for "are we running as root on a Unix-ish OS?"
+/// Used by capability advertisement (Phase 8). Cross-platform safe —
+/// returns false on Windows where the concept doesn't apply.
+fn is_running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid() is a pure FFI call with no preconditions.
+        unsafe { libc_getuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[cfg(unix)]
+#[link(name = "c")]
+unsafe extern "C" {
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
+}
 use crate::config::AgentConfig;
 
 /// Cap WebSocket message size to bound memory per frame. Screenshots are the
@@ -129,6 +151,7 @@ async fn handle_conn(
     // payload so the WorldObserver can include it in every WorldState
     // snapshot it emits.
     let world_displays = displays.clone();
+    let has_display = !world_displays.is_empty();
     tx.send(Message::Binary(encode(&KestrelMessage {
         stream_id: 0, kind: MsgKind::Event,
         payload: Payload::SystemInfo {
@@ -136,6 +159,32 @@ async fn handle_conn(
             displays,
             hostname: node_id,
         },
+    })?)).await?;
+
+    // Phase 8: capability advertisement. Best-effort detection of
+    // common runtime capabilities — the AI uses these to pick a
+    // node by predicate via the hub's `fleet_find` MCP tool.
+    let caps = kestrel_proto::Capabilities {
+        os: std::env::consts::OS.into(),
+        // GPU detection is platform-specific and we don't have a
+        // dependency for it. v1 reports false; future PR can wire
+        // in `metal-rs` on macOS, vulkan probe on Linux, etc.
+        has_gpu: false,
+        has_display,
+        // sudo: best-effort. On Unix, `id -u == 0` means root (so
+        // sudo is trivially "yes"); otherwise we'd have to run
+        // `sudo -n true` which prompts on some configs. Conservative:
+        // report false unless we're literally root.
+        has_sudo: is_running_as_root(),
+        // Docker: probe by trying `docker version --format '{{.Server.Version}}'`
+        // would block on the network. Conservative v1: false. A
+        // follow-up can probe the docker socket directly without
+        // running a subprocess.
+        has_docker: false,
+    };
+    tx.send(Message::Binary(encode(&KestrelMessage {
+        stream_id: 0, kind: MsgKind::Event,
+        payload: Payload::Capabilities { caps },
     })?)).await?;
 
     // Shell event channel — bounded so a stalled hub (TCP backpressure) can't

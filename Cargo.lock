@@ -2595,6 +2595,7 @@ dependencies = [
  "rmcp",
  "rustls 0.21.12",
  "rustls 0.23.40",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",
