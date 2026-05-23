@@ -34,9 +34,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Init {
-        /// IP the agent enrollment command will point at. Default `127.0.0.1`
-        /// is for loopback / single-machine setups; pass `--bind 0.0.0.0` (or
-        /// the LAN IP of this hub host) to let other machines enroll.
+        /// Hub host as it will appear in the printed `kestrel-agent enroll
+        /// --hub <bind>` line. Defaults to `127.0.0.1` for loopback; pass the
+        /// LAN IP of this machine (e.g. `--bind 192.168.1.10`) when
+        /// enrolling agents on other hosts. Not a listen address — the hub
+        /// itself only listens on `--dashboard`.
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
         #[arg(long, default_value = "kestrel.toml")]

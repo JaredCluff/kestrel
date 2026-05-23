@@ -4,7 +4,7 @@ Rust-native fleet control: TLS WebSocket transport, MCP-compatible operator hub,
 
 ## Security model
 
-Hub↔agent uses TLS WebSocket with PSK-HMAC mutual authentication, **bound to the TLS session via the TLS-exporter**. The agent generates a one-shot self-signed cert at startup (not pinned); a LAN MITM that terminates TLS on each leg sees a different exporter than the legitimate endpoint, so the proxied MAC won't verify on the far side and the connection dies. The PSK is in your system keyring (`kestrel-hub init` / `kestrel-agent enroll` puts it there).
+Hub↔agent uses TLS WebSocket with a one-direction PSK-HMAC challenge-response (the agent challenges the hub), **bound to the TLS session via the TLS-exporter**. The agent generates a one-shot self-signed cert at startup (not pinned); a LAN MITM that terminates TLS on each leg sees a different exporter than the legitimate endpoint, so the proxied MAC won't verify on the far side and the connection dies. The PSK is in your system keyring (`kestrel-hub init` / `kestrel-agent enroll` puts it there).
 
 The hub's dashboard at `:7273` is plain HTTP. Read-only endpoints (HTML dashboard, `/api/nodes` GET, `/api/events` SSE) are open. Mutation endpoints (`POST`/`DELETE /api/nodes`) require a Bearer control token from the keyring. LAN-only assumed for the dashboard host.
 
@@ -56,7 +56,7 @@ In another terminal (or another host):
 | Command | What it does |
 |---|---|
 | `init` | Generate PSK + control token, store both in keyring, scaffold `kestrel.toml` |
-| `connect` | One-shot test: connect to each configured node, then exit |
+| `connect` | Connect to each configured node, print result, block until Ctrl-C (smoke test) |
 | `start` | Long-running: supervisors + KVM + dashboard + MCP-on-stdio |
 | `add-node <id> <addr>` | Append `[[hub.nodes]]` to config; applies live if hub is running |
 | `remove-node <id>` | Remove a node from config; applies live if hub is running |
