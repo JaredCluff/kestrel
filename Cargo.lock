@@ -2554,6 +2554,7 @@ dependencies = [
  "rcgen",
  "rustls 0.21.12",
  "serde",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-rustls 0.24.1",
