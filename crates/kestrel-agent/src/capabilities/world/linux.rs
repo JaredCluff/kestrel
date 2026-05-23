@@ -67,11 +67,18 @@ pub fn current_focused_app() -> Option<FocusedApp> {
 }
 
 pub fn current_mouse_position() -> Option<MousePosition> {
-    // Wayland deliberately doesn't expose cursor position to
-    // arbitrary clients (privacy); X11 does via XQueryPointer.
-    // Probing for X11 without a dep that wraps it means linking
-    // libX11 directly. To keep dep surface small, this is a
-    // documented stub. A future PR could link to x11rb or fall
-    // back to /dev/input/mice on root-owned daemons.
-    None
+    // X11: XQueryPointer on the root window returns the cursor's
+    // root-relative coords. Wayland deliberately hides this (privacy)
+    // so we silently return None there. x11rb's connect() honors
+    // $DISPLAY and falls through to an Err when the session is
+    // Wayland-only — exactly the behavior we want.
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt;
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen_num)?.root;
+    let reply = conn.query_pointer(root).ok()?.reply().ok()?;
+    Some(MousePosition {
+        x: reply.root_x as i32,
+        y: reply.root_y as i32,
+    })
 }

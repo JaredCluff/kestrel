@@ -48,6 +48,10 @@ unexpected_cfgs = { level = "allow" }
 # entry point stays synchronous, matching the macOS and Windows paths.
 [target.'cfg(target_os = "linux")'.dependencies]
 atspi = "0.22"
+# X11 cursor query via XQueryPointer. Pure-Rust client (no libX11 link),
+# gated behind runtime DISPLAY presence so a Wayland-only session
+# silently returns None rather than crashing.
+x11rb = { version = "0.13", default-features = false }
 
 # Windows: UI Automation via the uiautomation crate (a thin wrapper over
 # the COM API). Pulls in windows-rs + COM bindings, gated to Windows

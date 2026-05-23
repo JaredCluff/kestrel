@@ -97,14 +97,16 @@ enum ActorCmd {
 
 type WsStream = WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
-/// Phase 6: callers of `run_actor` can opt-in to a side channel that
-/// receives every `Payload::WorldUpdate` the agent pushes. Supervisor
-/// wires this to the NodeRegistry's `observe_world_update`. Tests
-/// that don't care pass `None`.
+/// Phase 6: callers of `run_actor` can opt-in to side channels that
+/// receive every `Payload::WorldUpdate` and `Payload::Capabilities`
+/// the agent pushes post-handshake. Supervisor wires these to the
+/// NodeRegistry's `observe_world_update` / `record_capabilities`.
+/// Tests that don't care pass `None`.
 async fn run_actor(
     ws: WsStream,
     mut cmd_rx: mpsc::Receiver<ActorCmd>,
     world_tx: Option<mpsc::UnboundedSender<kestrel_proto::WorldState>>,
+    caps_tx: Option<mpsc::UnboundedSender<kestrel_proto::Capabilities>>,
 ) {
     let (mut tx, mut rx) = ws.split();
     let mut pending: HashMap<u32, oneshot::Sender<anyhow::Result<KestrelMessage>>> = HashMap::new();
@@ -182,6 +184,13 @@ async fn run_actor(
                                 // update (registry was torn down).
                                 if let Some(tx) = world_tx.as_ref() {
                                     let _ = tx.send(state.clone());
+                                }
+                            }
+                            Payload::Capabilities { caps } => {
+                                // Phase 8 follow-up: live capability
+                                // updates received post-handshake.
+                                if let Some(tx) = caps_tx.as_ref() {
+                                    let _ = tx.send(caps.clone());
                                 }
                             }
                             _ => {}
@@ -413,17 +422,18 @@ pub async fn connect(
     addr: SocketAddr,
     psk: &[u8],
 ) -> anyhow::Result<(NodeHandle, tokio::task::JoinHandle<()>)> {
-    let (handle, actor_join, _world_rx) = connect_with_world_sink(addr, psk).await?;
-    // Caller didn't want the world updates — drain to /dev/null so the
+    let (handle, actor_join, _world_rx, _caps_rx) = connect_with_world_sink(addr, psk).await?;
+    // Caller didn't want the side channels — drain to /dev/null so the
     // actor's send doesn't pile up unsent items.
     drop(_world_rx);
+    drop(_caps_rx);
     Ok((handle, actor_join))
 }
 
-/// Phase 6 variant of `connect`. Additionally returns an
-/// `UnboundedReceiver<WorldState>` carrying every `Payload::WorldUpdate`
-/// the agent pushes. Supervisor wires this to the NodeRegistry's
-/// `observe_world_update`; tests that don't care can use the bare
+/// Phase 6 variant of `connect`. Additionally returns side channels for
+/// `Payload::WorldUpdate` and `Payload::Capabilities`. Supervisor wires
+/// these to the NodeRegistry's `observe_world_update` and
+/// `record_capabilities`; tests that don't care can use the bare
 /// `connect()` wrapper above.
 pub async fn connect_with_world_sink(
     addr: SocketAddr,
@@ -432,6 +442,7 @@ pub async fn connect_with_world_sink(
     NodeHandle,
     tokio::task::JoinHandle<()>,
     mpsc::UnboundedReceiver<kestrel_proto::WorldState>,
+    mpsc::UnboundedReceiver<kestrel_proto::Capabilities>,
 )> {
     let tls = tls_connect(addr).await?;
 
@@ -457,12 +468,14 @@ pub async fn connect_with_world_sink(
     let ws = tx.reunite(rx).expect("same stream");
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (world_tx, world_rx) = mpsc::unbounded_channel();
-    let actor_join = tokio::spawn(run_actor(ws, cmd_rx, Some(world_tx)));
+    let (caps_tx, caps_rx) = mpsc::unbounded_channel();
+    let actor_join = tokio::spawn(run_actor(ws, cmd_rx, Some(world_tx), Some(caps_tx)));
 
     Ok((
         NodeHandle { node_id, os_info, displays, capabilities, cmd_tx },
         actor_join,
         world_rx,
+        caps_rx,
     ))
 }
 

@@ -74,10 +74,18 @@ impl NodeRegistry {
 
     /// Phase 8: record a node's capabilities. Called from the actor
     /// on inbound `Payload::Capabilities`. Overwrites any prior
-    /// record — agents may report different capabilities on
-    /// reconnect (e.g. GPU plugged in between connections).
+    /// record. Phase 8 follow-up: agents now re-emit Capabilities
+    /// periodically (~30s) so dynamic changes (docker started,
+    /// display plugged) propagate without a reconnect. This method
+    /// is idempotent for unchanged values.
     pub async fn record_capabilities(&self, node_id: &str, caps: Capabilities) {
-        self.capabilities.write().await.insert(node_id.to_string(), caps);
+        let mut map = self.capabilities.write().await;
+        if let Some(prev) = map.get(node_id) {
+            if *prev == caps {
+                return;
+            }
+        }
+        map.insert(node_id.to_string(), caps);
     }
 
     /// Look up a node's reported capabilities.

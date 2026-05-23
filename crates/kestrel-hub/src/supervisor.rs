@@ -47,7 +47,7 @@ pub fn spawn(
             }
 
             match transport::connect_with_world_sink(node_cfg.address, &*psk).await {
-                Ok((mut handle, actor_join, mut world_rx)) => {
+                Ok((mut handle, actor_join, mut world_rx, mut caps_rx)) => {
                     // Verify the agent's claimed hostname matches the
                     // configured node_id. With per-node PSKs (PR #29)
                     // mismatched ids fail authentication entirely, so
@@ -87,6 +87,20 @@ pub fn spawn(
                         }
                     });
 
+                    // Phase 8 follow-up: pump live Capabilities frames
+                    // the agent re-emits periodically into the registry.
+                    // record_capabilities is idempotent for unchanged
+                    // values, so re-sends are cheap.
+                    let caps_registry = registry.clone();
+                    let caps_node_id = node_cfg.node_id.clone();
+                    let caps_pump = tokio::spawn(async move {
+                        while let Some(caps) = caps_rx.recv().await {
+                            caps_registry
+                                .record_capabilities(&caps_node_id, caps)
+                                .await;
+                        }
+                    });
+
                     // Wait for the actor to exit (connection closed / error).
                     let _ = actor_join.await;
                     // The world receiver drops with run_actor; the pump
@@ -94,6 +108,7 @@ pub fn spawn(
                     // belt-and-braces for the unusual case where the
                     // pump hasn't woken up yet.
                     world_pump.abort();
+                    caps_pump.abort();
                     attempt = 1;
                     registry
                         .mark_disconnected(&node_cfg.node_id, attempt, backoff_for(0))
