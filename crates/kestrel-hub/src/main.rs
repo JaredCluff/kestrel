@@ -85,6 +85,16 @@ enum Command {
         /// rather than writing to stdout.
         #[arg(long)]
         audit_log: Option<String>,
+        /// PEM-encoded certificate for the dashboard. Pair with
+        /// `--dashboard-key`. When both are supplied, the dashboard
+        /// serves HTTPS; otherwise it serves plain HTTP (LAN-trusted
+        /// default).
+        #[arg(long)]
+        dashboard_cert: Option<String>,
+        /// PEM-encoded private key for the dashboard. Pair with
+        /// `--dashboard-cert`.
+        #[arg(long)]
+        dashboard_key: Option<String>,
     },
     /// Append a node to kestrel.toml. If the hub is running, applies live;
     /// otherwise the change takes effect at next `start`.
@@ -234,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 actor.abort();
             }
         }
-        Command::Start { config, audit_log } => {
+        Command::Start { config, audit_log, dashboard_cert, dashboard_key } => {
             let cfg = HubConfig::from_file(&config)?;
             // Resolve the audit logger up front so we either know it's
             // working before binding sockets, or we fall back to disabled
@@ -297,20 +307,66 @@ async fn main() -> anyhow::Result<()> {
 
             kestrel_hub::kvm::start(shared_layout.clone(), registry.clone());
 
-            // Start the dashboard HTTP server. Failure to bind is fatal because the user
-            // explicitly configured this address — surface the error rather than silently
-            // continuing without a dashboard.
-            let dash_listener = tokio::net::TcpListener::bind(cfg.listen_dashboard)
-                .await
-                .map_err(|e| anyhow::anyhow!("dashboard bind to {} failed: {}", cfg.listen_dashboard, e))?;
-            let dash_addr = dash_listener.local_addr()?;
+            // Start the dashboard. Failure to bind is fatal because the user
+            // explicitly configured this address — surface the error rather
+            // than silently continuing without a dashboard.
+            //
+            // TLS is opt-in: both --dashboard-cert and --dashboard-key must
+            // be provided together. If only one is set, that's a config
+            // error and we refuse to start (rather than silently fall back
+            // to plain HTTP and surprise the operator).
             let dash_state = state.clone();
-            let dashboard_handle = tokio::spawn(async move {
-                if let Err(e) = axum::serve(dash_listener, dashboard::router(dash_state)).await {
-                    tracing::error!("dashboard server error: {}", e);
+            let dash_addr = cfg.listen_dashboard;
+            let dashboard_handle = match (dashboard_cert.as_deref(), dashboard_key.as_deref()) {
+                (Some(cert_path), Some(key_path)) => {
+                    // rustls 0.23 (transitively from axum-server 0.7) requires a
+                    // CryptoProvider be installed at process startup. We install
+                    // the `ring` provider here, lazily — it's idempotent in the
+                    // sense that the second call returns the existing provider
+                    // back unchanged. Ignoring the Result is intentional.
+                    let _ = rustls_23::crypto::ring::default_provider().install_default();
+                    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                        cert_path, key_path,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "dashboard TLS load (cert={}, key={}) failed: {}",
+                            cert_path, key_path, e
+                        )
+                    })?;
+                    println!("Dashboard at https://{}", dash_addr);
+                    tokio::spawn(async move {
+                        if let Err(e) = axum_server::bind_rustls(dash_addr, tls)
+                            .serve(dashboard::router(dash_state).into_make_service())
+                            .await
+                        {
+                            tracing::error!("dashboard TLS server error: {}", e);
+                        }
+                    })
                 }
-            });
-            println!("Dashboard at http://{}", dash_addr);
+                (None, None) => {
+                    let dash_listener = tokio::net::TcpListener::bind(dash_addr)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("dashboard bind to {} failed: {}", dash_addr, e)
+                        })?;
+                    let bound = dash_listener.local_addr()?;
+                    println!("Dashboard at http://{}", bound);
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            axum::serve(dash_listener, dashboard::router(dash_state)).await
+                        {
+                            tracing::error!("dashboard server error: {}", e);
+                        }
+                    })
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    anyhow::bail!(
+                        "--dashboard-cert and --dashboard-key must both be provided to enable TLS"
+                    );
+                }
+            };
 
             println!("Kestrel hub started. Serving MCP via stdio.");
             let mcp = KestrelMcp::with_audit(registry, audit);
