@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod keys;
 pub mod message;
+pub mod world;
 
 pub use auth::{
     derive_per_node_psk, derive_session_signing_key, hmac_response, verify_response,
@@ -10,4 +11,7 @@ pub use keys::{is_modifier, parse_key_str};
 pub use message::{
     AccessibilityNode, Button, ClipboardContent, DisplayInfo, ErrorCode, KeyCode,
     KestrelMessage, Modifiers, MsgKind, OsInfo, Payload, PressRelease, Rect,
+};
+pub use world::{
+    ClipboardKind, ClipboardMetadata, FocusedApp, MousePosition, ShellSession, WorldState,
 };
