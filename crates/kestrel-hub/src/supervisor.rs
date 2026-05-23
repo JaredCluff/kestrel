@@ -46,26 +46,46 @@ pub fn spawn(
                 registry.mark_reconnecting(&node_cfg.node_id, 0).await;
             }
 
-            match transport::connect(node_cfg.address, &*psk).await {
-                Ok((mut handle, actor_join)) => {
+            match transport::connect_with_world_sink(node_cfg.address, &*psk).await {
+                Ok((mut handle, actor_join, mut world_rx)) => {
                     // Verify the agent's claimed hostname matches the
-                    // configured node_id. A typo in kestrel.toml pointing one
-                    // node's address at another node's host would otherwise
-                    // silently work (PSK is shared across the fleet) and
-                    // register the agent under the wrong identity.
+                    // configured node_id. With per-node PSKs (PR #29)
+                    // mismatched ids fail authentication entirely, so
+                    // this branch is unreachable in practice; the
+                    // override is kept as a belt-and-braces for any
+                    // future scenario where the agent's claimed id
+                    // could differ from the hub's configured one.
                     if handle.node_id != node_cfg.node_id {
                         tracing::warn!(
-                            "supervisor: {} reports hostname '{}'; registering under configured node_id (set the agent's --node-id to match if intentional)",
+                            "supervisor: {} reports hostname '{}'; registering under configured node_id",
                             node_cfg.address,
                             handle.node_id,
                         );
-                        // Trust the operator's config over the agent's
-                        // self-report. The registry key is the configured id.
                         handle.node_id = node_cfg.node_id.clone();
                     }
                     registry.register(handle).await;
+
+                    // Spawn a side task that forwards the agent's
+                    // WorldUpdate stream into the registry's world
+                    // cache. Exits when either the WS dies (world_rx
+                    // closes) or the supervisor task itself is aborted.
+                    let world_registry = registry.clone();
+                    let world_node_id = node_cfg.node_id.clone();
+                    let world_pump = tokio::spawn(async move {
+                        while let Some(state) = world_rx.recv().await {
+                            world_registry
+                                .observe_world_update(&world_node_id, state)
+                                .await;
+                        }
+                    });
+
                     // Wait for the actor to exit (connection closed / error).
                     let _ = actor_join.await;
+                    // The world receiver drops with run_actor; the pump
+                    // sees Ok(None) and exits naturally. abort() is a
+                    // belt-and-braces for the unusual case where the
+                    // pump hasn't woken up yet.
+                    world_pump.abort();
                     attempt = 1;
                     registry
                         .mark_disconnected(&node_cfg.node_id, attempt, backoff_for(0))
