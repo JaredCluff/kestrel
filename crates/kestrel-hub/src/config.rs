@@ -197,6 +197,31 @@ pub fn remove_layout(doc: &mut toml::Value, node_id: &str) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Variant of [`remove_layout`] that distinguishes "layout entry not
+/// present" (`Ok(false)`) from structural config errors like
+/// `hub.layout = "not an array"` (`Err`). Pairs with [`try_remove_node`]:
+/// the dashboard delete endpoint maps these to 404 and 500 respectively
+/// so the operator gets actionable feedback instead of a misleading 404
+/// when their config is actually malformed.
+pub fn try_remove_layout(doc: &mut toml::Value, node_id: &str) -> anyhow::Result<bool> {
+    let hub = hub_table_mut(doc)?;
+    match hub.get_mut("layout") {
+        None => Ok(false),
+        Some(v) => match v.as_array_mut() {
+            None => anyhow::bail!("hub.layout is not an array"),
+            Some(layout) => {
+                let before = layout.len();
+                layout.retain(|n| {
+                    n.as_table()
+                        .and_then(|t| t.get("node_id"))
+                        .and_then(|v| v.as_str()) != Some(node_id)
+                });
+                Ok(layout.len() != before)
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

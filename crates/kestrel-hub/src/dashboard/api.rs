@@ -128,7 +128,10 @@ pub async fn events_handler(
 use axum::extract::Path;
 use axum::http::StatusCode;
 
-use crate::config::{add_node, load_doc, save_doc, try_remove_node};
+use crate::config::{
+    add_node, load_doc, save_doc, set_layout as cfg_set_layout, try_remove_layout, try_remove_node,
+    NodeLayout,
+};
 use crate::dashboard::AppState;
 use crate::supervisor;
 
@@ -340,6 +343,102 @@ pub async fn delete_node(
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
     delete_node_impl(&state, &node_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -------- /api/layout (hot-reload of the KVM grid) --------------------------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct LayoutBody {
+    pub node_id: String,
+    pub col: i64,
+    pub row: i64,
+}
+
+/// Apply a layout edit to BOTH the on-disk config and the live KVM
+/// state. Order matters:
+///   1. Take `config_write_lock` so no other writer can interleave.
+///   2. Mutate the TOML doc + save (file is the source of truth on
+///      restart).
+///   3. Take `layout.write()` and apply the same edit. If save_doc fails
+///      we never touch the in-memory layout, so the two views stay
+///      consistent.
+async fn set_layout_impl(
+    state: &AppState,
+    body: &LayoutBody,
+) -> Result<(), (StatusCode, String)> {
+    let _lock = state.config_write_lock.lock().await;
+    let mut doc = load_doc(&state.config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    cfg_set_layout(&mut doc, &body.node_id, body.col, body.row)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    save_doc(&state.config_path, &doc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // In-memory mutation: replace the matching node_id's entry, or
+    // append if none. Mirrors what config::set_layout does to the TOML.
+    // NodeLayout's col/row are i32 (grid coordinates fit easily); the
+    // wire/TOML side uses i64 to match TOML's native integer width.
+    // Cast at the boundary.
+    let mut layout = state.layout.write().await;
+    layout.retain(|l| l.node_id != body.node_id);
+    layout.push(NodeLayout {
+        node_id: body.node_id.clone(),
+        col: body.col as i32,
+        row: body.row as i32,
+    });
+    Ok(())
+}
+
+async fn delete_layout_impl(
+    state: &AppState,
+    node_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let _lock = state.config_write_lock.lock().await;
+    let mut doc = load_doc(&state.config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Distinguish "well-formed but absent" (Ok(false) → 404) from
+    // "hub.layout is malformed" (Err → 500). Mirrors the try_remove_node
+    // pattern so the operator gets actionable feedback instead of a
+    // misleading 404.
+    let removed = try_remove_layout(&mut doc, node_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !removed {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("layout entry '{}' not found", node_id),
+        ));
+    }
+    save_doc(&state.config_path, &doc)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut layout = state.layout.write().await;
+    layout.retain(|l| l.node_id != node_id);
+    Ok(())
+}
+
+/// POST /api/layout — body: { node_id, col, row }
+/// Idempotent: re-setting an existing node_id moves it to the new (col,
+/// row) without erroring. Returns 204 on success.
+pub async fn post_layout(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<LayoutBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    set_layout_impl(&state, &body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /api/layout/:node_id
+/// Removes the named node from the KVM grid. 404 if not present.
+pub async fn delete_layout(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(node_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    delete_layout_impl(&state, &node_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

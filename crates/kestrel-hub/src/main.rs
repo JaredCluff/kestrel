@@ -99,19 +99,28 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:7273")]
         hub: String,
     },
-    /// Set or update a KVM layout entry for a node.
+    /// Set or update a KVM layout entry for a node. Hot-reload: applies live
+    /// against a running hub via the dashboard API; falls back to file
+    /// mutation if the hub isn't reachable.
     LayoutSet {
         node_id: String,
         col: i64,
         row: i64,
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
+        /// Hub control URL (HTTP). If reachable, the change applies live.
+        #[arg(long, default_value = "http://127.0.0.1:7273")]
+        hub: String,
     },
-    /// Remove a KVM layout entry.
+    /// Remove a KVM layout entry. Hot-reload: applies live against a
+    /// running hub; falls back to file mutation if the hub isn't reachable.
     LayoutUnset {
         node_id: String,
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
+        /// Hub control URL (HTTP). If reachable, the change applies live.
+        #[arg(long, default_value = "http://127.0.0.1:7273")]
+        hub: String,
     },
     /// Print the agent enrollment line for a configured node.
     ///
@@ -222,10 +231,14 @@ async fn main() -> anyhow::Result<()> {
             // The hub stores ONLY the master_secret. Each supervisor derives its node's
             // per-node PSK at connect time. The dashboard's add-node endpoint does the
             // same derivation when hot-spawning a supervisor.
-            let state = dashboard::AppState::new(
+            // Single SharedLayout shared between the KVM task and the dashboard
+            // so layout edits via `POST /api/layout` apply live.
+            let shared_layout = kestrel_hub::kvm::shared_layout(cfg.layout.clone());
+            let state = dashboard::AppState::with_layout(
                 registry.clone(),
                 config.clone(),
                 master_secret.clone(),
+                shared_layout.clone(),
             );
             let state = match enrollment::load_control_token() {
                 Ok(token) => state.with_control_token(token),
@@ -251,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("supervising: {} ({})", node.node_id, node.address);
             }
 
-            kestrel_hub::kvm::start(cfg.layout.clone(), registry.clone());
+            kestrel_hub::kvm::start(shared_layout.clone(), registry.clone());
 
             // Start the dashboard HTTP server. Failure to bind is fatal because the user
             // explicitly configured this address — surface the error rather than silently
@@ -365,17 +378,50 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::LayoutSet { node_id, col, row, config } => {
-            let mut doc = kestrel_hub::config::load_doc(&config)?;
-            kestrel_hub::config::set_layout(&mut doc, &node_id, col, row)?;
-            kestrel_hub::config::save_doc(&config, &doc)?;
-            println!("layout: '{}' -> ({}, {}).", node_id, col, row);
+        Command::LayoutSet { node_id, col, row, config, hub } => {
+            // HTTP-first-with-fallback: if a hub is running on `hub`, apply the
+            // edit live so the running KVM task picks it up without a restart;
+            // otherwise mutate the file directly for next-start.
+            let mut client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            if let Some(t) = resolve_control_token() {
+                client = client.with_token(t);
+            }
+            match client.set_layout(&node_id, col, row).await {
+                Ok(()) => {
+                    println!("layout: '{}' -> ({}, {}) (live via {}).", node_id, col, row, hub);
+                }
+                Err(e) if is_hub_responded_error(&e) => {
+                    return Err(e.context(format!("hub at {} rejected layout-set", hub)));
+                }
+                Err(e) => {
+                    tracing::debug!("hub not reachable ({}), writing file directly", e);
+                    let mut doc = kestrel_hub::config::load_doc(&config)?;
+                    kestrel_hub::config::set_layout(&mut doc, &node_id, col, row)?;
+                    kestrel_hub::config::save_doc(&config, &doc)?;
+                    println!("layout: '{}' -> ({}, {}).", node_id, col, row);
+                }
+            }
         }
-        Command::LayoutUnset { node_id, config } => {
-            let mut doc = kestrel_hub::config::load_doc(&config)?;
-            kestrel_hub::config::remove_layout(&mut doc, &node_id)?;
-            kestrel_hub::config::save_doc(&config, &doc)?;
-            println!("layout cleared for '{}'.", node_id);
+        Command::LayoutUnset { node_id, config, hub } => {
+            let mut client = kestrel_hub::client::HubClient::with_quick_timeout(&hub);
+            if let Some(t) = resolve_control_token() {
+                client = client.with_token(t);
+            }
+            match client.remove_layout(&node_id).await {
+                Ok(()) => {
+                    println!("layout cleared for '{}' (live via {}).", node_id, hub);
+                }
+                Err(e) if is_hub_responded_error(&e) => {
+                    return Err(e.context(format!("hub at {} rejected layout-unset", hub)));
+                }
+                Err(e) => {
+                    tracing::debug!("hub not reachable ({}), writing file directly", e);
+                    let mut doc = kestrel_hub::config::load_doc(&config)?;
+                    kestrel_hub::config::remove_layout(&mut doc, &node_id)?;
+                    kestrel_hub::config::save_doc(&config, &doc)?;
+                    println!("layout cleared for '{}'.", node_id);
+                }
+            }
         }
         Command::Key { node_id, bind } => {
             // Re-derive (deterministically) the per-node PSK from the hub's
