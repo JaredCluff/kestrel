@@ -73,6 +73,18 @@ enum Command {
     Start {
         #[arg(long, default_value = "kestrel.toml")]
         config: String,
+        /// Append every MCP tool call to this JSONL file. Use `--audit-log -`
+        /// or omit to disable. Each line records: timestamp, tool name,
+        /// node_id, an args summary (secrets-free — typed text and
+        /// clipboard payloads are length-only), status (ok/error),
+        /// duration_ms, and the error message on failure.
+        ///
+        /// MUST NOT be a path that goes to stdout — the MCP server speaks
+        /// JSON-RPC on stdio and an audit line on stdout would corrupt
+        /// the protocol. The `-` sentinel explicitly disables audit
+        /// rather than writing to stdout.
+        #[arg(long)]
+        audit_log: Option<String>,
     },
     /// Append a node to kestrel.toml. If the hub is running, applies live;
     /// otherwise the change takes effect at next `start`.
@@ -222,8 +234,25 @@ async fn main() -> anyhow::Result<()> {
                 actor.abort();
             }
         }
-        Command::Start { config } => {
+        Command::Start { config, audit_log } => {
             let cfg = HubConfig::from_file(&config)?;
+            // Resolve the audit logger up front so we either know it's
+            // working before binding sockets, or we fall back to disabled
+            // with a clear warning. We never let an audit-log open failure
+            // prevent the hub from starting.
+            let audit = match audit_log.as_deref() {
+                Some("-") | None => kestrel_hub::audit::AuditLogger::disabled(),
+                Some(path) => match kestrel_hub::audit::AuditLogger::file(path).await {
+                    Ok(logger) => {
+                        println!("Audit log: appending to {}", path);
+                        logger
+                    }
+                    Err(e) => {
+                        tracing::warn!("audit log open failed ({}); proceeding without audit", e);
+                        kestrel_hub::audit::AuditLogger::disabled()
+                    }
+                },
+            };
             let master_secret = enrollment::load_master_secret()?;
             let registry = Arc::new(NodeRegistry::new());
 
@@ -284,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Dashboard at http://{}", dash_addr);
 
             println!("Kestrel hub started. Serving MCP via stdio.");
-            let mcp = KestrelMcp::new(registry);
+            let mcp = KestrelMcp::with_audit(registry, audit);
             let service = mcp.serve(stdio()).await.inspect_err(|e| {
                 tracing::error!("MCP serve error: {e:?}");
             })?;
