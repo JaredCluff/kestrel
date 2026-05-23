@@ -71,6 +71,7 @@ impl ShellManager {
 
         let event_tx = self.event_tx.clone();
         let sessions = self.sessions.clone();
+        let reader_child = child.clone();
         let id = pty_id;
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -90,6 +91,14 @@ impl ShellManager {
                         }
                     }
                 }
+            }
+            // Reader saw EOF (child exited) or our channel closed (hub gone).
+            // Reap the child explicitly so it doesn't linger as a zombie in
+            // the process table — portable-pty wraps std::process::Child, and
+            // std::process::Child requires wait() to be called or the OS
+            // entry leaks until the agent process exits.
+            if let Ok(mut c) = reader_child.lock() {
+                let _ = c.wait();
             }
             sessions.lock().unwrap().remove(&id);
             let _ = event_tx.blocking_send(KestrelMessage {
@@ -126,6 +135,11 @@ impl ShellManager {
         // Kill the child first; dropping the master FD doesn't unblock the reader's
         // blocking read() on Linux until the child exits. Best-effort — if the
         // child is already gone, kill() returns an error we ignore.
+        //
+        // The reader thread is responsible for reaping (wait()) the child once
+        // it sees EOF — we don't wait() here so close() stays non-blocking.
+        // SIGKILL then EOF on the master FD is enough to drive the reader to
+        // exit, and the reader's wait() prevents zombies.
         if let Some(session) = self.sessions.lock().unwrap().remove(&pty_id) {
             if let Ok(mut child) = session.child.lock() {
                 let _ = child.kill();
