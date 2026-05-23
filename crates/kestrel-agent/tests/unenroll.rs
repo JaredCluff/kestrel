@@ -40,6 +40,7 @@ fn unenroll_dry_run_does_not_delete_config() {
 }
 
 #[test]
+#[ignore = "touches real OS keyring; run with --include-ignored to verify"]
 fn unenroll_yes_deletes_config_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = starter_toml(dir.path());
@@ -54,6 +55,7 @@ fn unenroll_yes_deletes_config_file() {
 }
 
 #[test]
+#[ignore = "touches real OS keyring; run with --include-ignored to verify"]
 fn unenroll_yes_with_missing_config_is_a_no_op_not_an_error() {
     // Agent-side mirror of the hub test — missing-file branch must be a
     // clean no-op.
@@ -75,6 +77,7 @@ fn unenroll_yes_with_missing_config_is_a_no_op_not_an_error() {
 }
 
 #[test]
+#[ignore = "touches real OS keyring; run with --include-ignored to verify"]
 fn unenroll_yes_keep_config_preserves_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = starter_toml(dir.path());

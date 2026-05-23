@@ -128,7 +128,7 @@ pub async fn events_handler(
 use axum::extract::Path;
 use axum::http::StatusCode;
 
-use crate::config::{add_node, load_doc, remove_node, save_doc};
+use crate::config::{add_node, load_doc, save_doc, try_remove_node};
 use crate::dashboard::AppState;
 use crate::supervisor;
 
@@ -138,8 +138,32 @@ pub struct AddNodeBody {
     pub address: String,
 }
 
+/// Constant-time bytestring equality. Returns true iff `a` and `b` have the
+/// same length AND the same bytes. Runtime is `O(max(a.len(), b.len()))`
+/// regardless of where (or whether) the first mismatch occurs — no
+/// short-circuit, so an on-path observer can't learn the bytes of `b` via
+/// timing. Mirrors the constant-time discipline `kestrel-proto::auth` uses
+/// for HMAC verification.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Length leak is unavoidable (we have to read both) and acceptable;
+        // tokens are fixed-size hex strings in practice.
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Check the `Authorization: Bearer <token>` header against the configured
 /// control token. If the state has no `control_token`, auth is disabled.
+///
+/// Comparison is constant-time — a LAN attacker can otherwise probe the
+/// token byte-by-byte by measuring response latency. The token is high
+/// entropy (~64 hex chars), but defense-in-depth matters here since the
+/// dashboard is documented as opt-in LAN-exposable.
 fn check_auth(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -152,7 +176,7 @@ fn check_auth(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
     match provided {
-        Some(t) if t == expected => Ok(()),
+        Some(t) if ct_eq(t.as_bytes(), expected.as_bytes()) => Ok(()),
         Some(_) => Err((StatusCode::UNAUTHORIZED, "invalid control token".into())),
         None => Err((StatusCode::UNAUTHORIZED, "missing Authorization: Bearer header".into())),
     }
@@ -227,7 +251,11 @@ pub async fn delete_node(
 
     let mut doc = load_doc(&state.config_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let in_config = remove_node(&mut doc, &node_id).is_ok();
+    // Distinguish "node not present" (Ok(false)) from structural config
+    // errors (Err). The latter should surface as 500, not as a misleading
+    // 404 — the operator needs to know their config is broken.
+    let in_config = try_remove_node(&mut doc, &node_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if in_config {
         save_doc(&state.config_path, &doc)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -272,6 +300,20 @@ mod tests {
             last_seen: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
             next_retry_in: None,
         }
+    }
+
+    #[test]
+    fn ct_eq_matches_equal_and_rejects_different_inputs() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"abcd"));
+        assert!(!ct_eq(b"abcd", b"abc"));
+        // Common operationally — full-length token vs. one-byte-off.
+        let a = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let b = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdee";
+        assert!(!ct_eq(a.as_bytes(), b.as_bytes()));
+        assert!(ct_eq(a.as_bytes(), a.as_bytes()));
     }
 
     #[test]

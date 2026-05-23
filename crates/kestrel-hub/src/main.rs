@@ -345,20 +345,35 @@ async fn main() -> anyhow::Result<()> {
                 println!("Re-run with --yes to perform these actions.");
                 return Ok(());
             }
+            // Track whether any destructive step failed so we can exit
+            // non-zero — important for scripted use:
+            //     kestrel-hub unenroll --yes && wipe-host
+            // should NOT proceed to wipe-host if the keyring or the config
+            // delete failed midway.
+            let mut any_failed = false;
             for step in enrollment::clear_hub_keyring() {
                 match step {
                     enrollment::UnenrollStep::Cleared(w) => println!("{:<16} cleared", w),
                     enrollment::UnenrollStep::NotFound(w) => println!("{:<16} (not found)", w),
-                    enrollment::UnenrollStep::Failed(w, e) => println!("{:<16} FAILED: {}", w, e),
+                    enrollment::UnenrollStep::Failed(w, e) => {
+                        println!("{:<16} FAILED: {}", w, e);
+                        any_failed = true;
+                    }
                 }
             }
             if will_delete_config {
                 match std::fs::remove_file(&config) {
                     Ok(()) => println!("{:<16} deleted", config),
-                    Err(e) => println!("{:<16} FAILED: {}", config, e),
+                    Err(e) => {
+                        println!("{:<16} FAILED: {}", config, e);
+                        any_failed = true;
+                    }
                 }
             } else if keep_config {
                 println!("{:<16} kept (--keep-config)", config);
+            }
+            if any_failed {
+                anyhow::bail!("one or more unenroll steps failed; system is in a partial state");
             }
         }
     }
