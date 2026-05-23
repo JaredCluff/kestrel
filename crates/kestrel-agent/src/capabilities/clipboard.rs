@@ -32,9 +32,23 @@ pub fn write_clipboard(content: ClipboardContent) -> anyhow::Result<()> {
         ClipboardContent::Image { png_bytes, width, height } => {
             let img = image::load_from_memory(&png_bytes).context("PNG decode for clipboard write")?;
             let rgba = img.to_rgba8();
+            // Use the decoded image's authoritative dimensions, not the
+            // wire-supplied hints. arboard interprets `width`/`height` as the
+            // geometry of the `bytes` buffer; if a caller declared a smaller
+            // size than the PNG actually encodes, the platform clipboard
+            // backend would treat the same buffer as a different geometry and
+            // every paste would be visibly corrupt. Reject the mismatch
+            // outright rather than silently let it through.
+            let (real_w, real_h) = (rgba.width(), rgba.height());
+            if real_w != width || real_h != height {
+                anyhow::bail!(
+                    "ClipboardWriteReq width/height ({}x{}) do not match decoded PNG ({}x{})",
+                    width, height, real_w, real_h
+                );
+            }
             let data = arboard::ImageData {
-                width: width as usize,
-                height: height as usize,
+                width: real_w as usize,
+                height: real_h as usize,
                 bytes: Cow::Owned(rgba.into_raw()),
             };
             cb.set_image(data).context("clipboard set_image")
