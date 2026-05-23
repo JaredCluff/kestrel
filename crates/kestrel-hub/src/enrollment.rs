@@ -97,7 +97,7 @@ pub fn scaffold_hub_config(path: &str, dashboard_addr: &str) -> anyhow::Result<(
     }
     let contents = format!(
         r#"# Kestrel hub configuration. Edit by hand or use `kestrel-hub` subcommands
-# (add-node, remove-node, layout) to mutate it programmatically.
+# (add-node, remove-node, layout-set, layout-unset) to mutate it programmatically.
 
 [hub]
 listen_mcp       = "stdio"
@@ -105,7 +105,7 @@ listen_dashboard = "{dashboard_addr}"
 
 # Nodes the hub connects to. Add with `kestrel-hub add-node <id> <addr>`.
 
-# Optional KVM layout for cursor-edge routing. Add with `kestrel-hub layout set <id> <col> <row>`.
+# Optional KVM layout for cursor-edge routing. Add with `kestrel-hub layout-set <id> <col> <row>`.
 "#,
         dashboard_addr = dashboard_addr,
     );
