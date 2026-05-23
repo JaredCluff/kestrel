@@ -17,14 +17,25 @@ async fn start_agent(node_id: &str) -> SocketAddr {
     ready_rx.await.expect("agent did not send bound address")
 }
 
+// NOTE: PTY slave ttys have ECHO enabled by default, so anything written to
+// the master is echoed back through the master *before* the shell touches
+// it. To verify the shell actually *executed* the command, the assertion
+// target must be something that only the shell can produce — typically a
+// substring that's the *result* of an expansion (arithmetic, command
+// substitution) and that doesn't appear in the input bytes. Otherwise the
+// test passes even if the shell never ran the command at all.
+
 #[tokio::test]
 async fn test_shell_run_echo() {
     let addr = start_agent("shell-echo-node").await;
     let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
-    let output = handle.run_shell("echo kestrel-phase3-ok").await.unwrap();
+    // 7*11 = 77. The literal "TAG_77" only appears in the shell's
+    // arithmetic-expanded output — the input bytes contain "TAG_$((7*11))"
+    // but no "77", so terminal echo alone cannot satisfy the assertion.
+    let output = handle.run_shell("printf 'TAG_%d\\n' $((7*11))").await.unwrap();
     assert!(
-        output.contains("kestrel-phase3-ok"),
-        "expected 'kestrel-phase3-ok' in shell output, got: {:?}",
+        output.contains("TAG_77"),
+        "expected arithmetic-expanded 'TAG_77' in shell output, got: {:?}",
         output
     );
 }
@@ -36,7 +47,12 @@ async fn test_shell_interactive_open_write_read_close() {
 
     let pty_id = handle.spawn_shell(None, 80, 24).await.unwrap();
 
-    handle.write_shell(pty_id, b"echo interactive-test\n".to_vec()).await.unwrap();
+    // 33+11 = 44. "INT_44_END" only appears after the shell evaluates the
+    // arithmetic expression — terminal echo of input alone cannot match.
+    handle
+        .write_shell(pty_id, b"printf 'INT_%d_END\\n' $((33+11))\n".to_vec())
+        .await
+        .unwrap();
 
     // Give the shell time to process the command
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -44,8 +60,8 @@ async fn test_shell_interactive_open_write_read_close() {
     let raw = handle.read_shell_buffer(pty_id).await.unwrap();
     let output = String::from_utf8_lossy(&raw);
     assert!(
-        output.contains("interactive-test"),
-        "expected 'interactive-test' in buffered output, got: {:?}",
+        output.contains("INT_44_END"),
+        "expected arithmetic-expanded 'INT_44_END' in buffered output, got: {:?}",
         output
     );
 
@@ -56,9 +72,15 @@ async fn test_shell_interactive_open_write_read_close() {
 async fn test_shell_run_multiline() {
     let addr = start_agent("shell-multiline-node").await;
     let (handle, _actor) = connect(addr, &test_psk()).await.unwrap();
-    let output = handle.run_shell("echo line1 && echo line2").await.unwrap();
-    assert!(output.contains("line1"), "missing line1 in: {:?}", output);
-    assert!(output.contains("line2"), "missing line2 in: {:?}", output);
+    // 10+5 = 15 and 20+5 = 25. Neither "A15_" nor "B25_" appears in the
+    // input bytes (which only contain the unexpanded "$((10+5))"/"$((20+5))"
+    // forms), so the assertion fails if the shell didn't actually run.
+    let output = handle
+        .run_shell("printf 'A%d_\\n' $((10+5)) && printf 'B%d_\\n' $((20+5))")
+        .await
+        .unwrap();
+    assert!(output.contains("A15_"), "missing A15_ in: {:?}", output);
+    assert!(output.contains("B25_"), "missing B25_ in: {:?}", output);
 }
 
 #[tokio::test]
