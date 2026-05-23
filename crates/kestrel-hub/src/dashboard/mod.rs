@@ -34,6 +34,12 @@ pub struct AppState {
     /// string; rotating the master automatically invalidates every
     /// outstanding session cookie.
     pub session_key: [u8; 32],
+    /// Live KVM layout. The KVM event-loop task reads this on every
+    /// mouse-edge crossing; the dashboard's POST/DELETE /api/layout
+    /// endpoints write to it under `config_write_lock` so file and
+    /// memory views stay synchronized. Hot-reload — no hub restart
+    /// needed to add or move a node on the grid.
+    pub layout: crate::kvm::SharedLayout,
     pub supervisors: SupervisorMap,
     /// Serializes config file read-modify-write cycles across concurrent HTTP requests.
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
@@ -49,12 +55,27 @@ impl AppState {
         config_path: String,
         master_secret: Vec<u8>,
     ) -> Self {
+        Self::with_layout(registry, config_path, master_secret, crate::kvm::shared_layout(Vec::new()))
+    }
+
+    /// Variant of [`new`] that lets the caller pass in a SharedLayout —
+    /// used by `Command::Start` to share the same `Arc<RwLock<...>>`
+    /// between the KVM task and the dashboard so layout edits via the
+    /// dashboard take effect live. Tests that don't drive the KVM task
+    /// use [`new`] which constructs an empty layout internally.
+    pub fn with_layout(
+        registry: Arc<NodeRegistry>,
+        config_path: String,
+        master_secret: Vec<u8>,
+        layout: crate::kvm::SharedLayout,
+    ) -> Self {
         let session_key = kestrel_proto::derive_session_signing_key(&master_secret);
         AppState {
             registry,
             config_path,
             master_secret,
             session_key,
+            layout,
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             control_token: None,
@@ -88,6 +109,8 @@ pub fn router(state: AppState) -> Router {
         .route("/ui/nodes/:node_id/delete", axum::routing::post(api::ui_delete_node))
         .route("/api/nodes", get(api::nodes_json).post(api::post_node))
         .route("/api/nodes/:node_id", axum::routing::delete(api::delete_node))
+        .route("/api/layout", axum::routing::post(api::post_layout))
+        .route("/api/layout/:node_id", axum::routing::delete(api::delete_layout))
         .route("/api/events", get(api::events_handler))
         .route("/assets/:name", get(asset_handler))
         .with_state(state)

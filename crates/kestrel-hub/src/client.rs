@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Context;
 use futures::stream::StreamExt;
 
-use crate::dashboard::api::{AddNodeBody, NodeEventDto, NodeStatusDto};
+use crate::dashboard::api::{AddNodeBody, LayoutBody, NodeEventDto, NodeStatusDto};
 
 /// HTTP client for a running kestrel-hub's JSON API. Used by both the TUI
 /// (read-only: fetch_nodes + subscribe_events) and the CLI (mutating:
@@ -119,6 +119,53 @@ impl HubClient {
     /// DELETE /api/nodes/{node_id}.
     pub async fn remove_node(&self, node_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/api/nodes/{}", self.base_url, node_id);
+        let mut req = self.http.delete(&url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.with_context(|| format!("DELETE {}", url))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "hub returned {} {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                body
+            );
+        }
+        Ok(())
+    }
+
+    /// POST /api/layout — set or update a node's KVM grid position.
+    /// Idempotent: re-posting the same node_id with new (col, row) moves it.
+    pub async fn set_layout(&self, node_id: &str, col: i64, row: i64) -> anyhow::Result<()> {
+        let url = format!("{}/api/layout", self.base_url);
+        let mut req = self.http.post(&url).json(&LayoutBody {
+            node_id: node_id.into(),
+            col,
+            row,
+        });
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.with_context(|| format!("POST {}", url))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "hub returned {} {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                body
+            );
+        }
+        Ok(())
+    }
+
+    /// DELETE /api/layout/{node_id} — remove a node from the KVM grid.
+    pub async fn remove_layout(&self, node_id: &str) -> anyhow::Result<()> {
+        let url = format!("{}/api/layout/{}", self.base_url, node_id);
         let mut req = self.http.delete(&url);
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);

@@ -10,13 +10,19 @@
 
 use std::sync::Arc;
 use rdev::EventType;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::config::NodeLayout;
 use crate::router::NodeRegistry;
 
+/// Hot-swappable layout, shared between the KVM task and the dashboard's
+/// layout-edit endpoints. Edits acquire `write()` briefly; the KVM event
+/// loop acquires `read()` on each edge crossing. The reads are short and
+/// uncontested in practice.
+pub type SharedLayout = Arc<RwLock<Vec<NodeLayout>>>;
+
 struct KvmState {
-    layout: Vec<NodeLayout>,
+    layout: SharedLayout,
     registry: Arc<NodeRegistry>,
     focused: Option<String>,
     virt_x: f64,
@@ -26,20 +32,28 @@ struct KvmState {
 }
 
 impl KvmState {
-    fn new(layout: Vec<NodeLayout>, registry: Arc<NodeRegistry>, local_w: u32, local_h: u32) -> Self {
+    fn new(layout: SharedLayout, registry: Arc<NodeRegistry>, local_w: u32, local_h: u32) -> Self {
         KvmState { layout, registry, focused: None, virt_x: 0.5, virt_y: 0.5,
             local_w: local_w as f64, local_h: local_h as f64 }
     }
 
-    fn find_neighbor(&self, dc: i32, dr: i32) -> Option<&NodeLayout> {
+    /// Look up the layout neighbor in direction (dc, dr) from the
+    /// currently-focused node. Reads the shared layout under a brief
+    /// read lock. Cloned out because we can't hold the read guard across
+    /// the await point in the caller.
+    async fn find_neighbor(&self, dc: i32, dr: i32) -> Option<NodeLayout> {
+        let layout = self.layout.read().await;
         let (base_col, base_row) = match &self.focused {
             None => (0, 0),
             Some(f) => {
-                let lay = self.layout.iter().find(|l| &l.node_id == f)?;
+                let lay = layout.iter().find(|l| &l.node_id == f)?;
                 (lay.col, lay.row)
             }
         };
-        self.layout.iter().find(|l| l.col == base_col + dc && l.row == base_row + dr)
+        layout
+            .iter()
+            .find(|l| l.col == base_col + dc && l.row == base_row + dr)
+            .cloned()
     }
 
     async fn handle_mouse_move(&mut self, abs_x: f64, abs_y: f64) {
@@ -64,13 +78,13 @@ impl KvmState {
         let norm_y = abs_y / self.local_h;
 
         let result = if norm_x >= 0.99 {
-            self.find_neighbor(1, 0).map(|n| (n.node_id.clone(), 0.01_f64, norm_y))
+            self.find_neighbor(1, 0).await.map(|n| (n.node_id, 0.01_f64, norm_y))
         } else if norm_x <= 0.01 {
-            self.find_neighbor(-1, 0).map(|n| (n.node_id.clone(), 0.99_f64, norm_y))
+            self.find_neighbor(-1, 0).await.map(|n| (n.node_id, 0.99_f64, norm_y))
         } else if norm_y <= 0.01 {
-            self.find_neighbor(0, -1).map(|n| (n.node_id.clone(), norm_x, 0.99_f64))
+            self.find_neighbor(0, -1).await.map(|n| (n.node_id, norm_x, 0.99_f64))
         } else if norm_y >= 0.99 {
-            self.find_neighbor(0, 1).map(|n| (n.node_id.clone(), norm_x, 0.01_f64))
+            self.find_neighbor(0, 1).await.map(|n| (n.node_id, norm_x, 0.01_f64))
         } else {
             None
         };
@@ -99,12 +113,20 @@ fn lock_cursor(lock: bool) {
     { let _ = lock; }
 }
 
-pub fn start(layout: Vec<NodeLayout>, registry: Arc<NodeRegistry>) {
-    if layout.is_empty() {
-        tracing::info!("KVM: no layout configured, disabled");
-        return;
-    }
+/// Wrap an initial layout in a SharedLayout suitable for passing to
+/// [`start`] AND the dashboard. Keeping construction in one place means
+/// callers can't accidentally hand out two independent layouts.
+pub fn shared_layout(initial: Vec<NodeLayout>) -> SharedLayout {
+    Arc::new(RwLock::new(initial))
+}
 
+/// Spawn the KVM cursor-routing task. The KVM task reads `layout` on
+/// every mouse-edge event, so external mutations to the same Arc apply
+/// live — no restart needed. If the initial layout is empty AND no one
+/// writes to it later, the task short-circuits and never runs the rdev
+/// listener; callers that may add layout entries later should still
+/// start the task (it's cheap when idle) so dashboard edits take effect.
+pub fn start(layout: SharedLayout, registry: Arc<NodeRegistry>) {
     let (local_w, local_h) = xcap::Monitor::all()
         .ok()
         .and_then(|m| m.into_iter().next())
