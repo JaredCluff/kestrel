@@ -139,6 +139,96 @@ pub async fn events_handler(
     events_stream(registry)
 }
 
+// -------- Phase 13 WebRTC signalling endpoints -----------------------------
+//
+// Browsers driving a WebRTC session against an agent POST through
+// these endpoints to set up the SDP offer/answer + ICE candidate
+// exchange. The actual RTP pipeline lives in the (deferred) agent-
+// side capture and hub-side SFU code; these are the signalling
+// primitives that establish the session.
+//
+// Auth: gated through check_auth — streaming is operator-only and
+// any active session can transmit substantial bandwidth.
+
+#[derive(serde::Deserialize)]
+pub struct WebrtcCreateBody {
+    pub node_id: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WebrtcSdpBody {
+    pub sdp_b64: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WebrtcIceBody {
+    pub candidate_json: String,
+}
+
+pub async fn webrtc_create_session(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<WebrtcCreateBody>,
+) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    let id = state.webrtc_sessions.create(body.node_id).await;
+    Ok(axum::Json(serde_json::json!({ "session_id": id })))
+}
+
+pub async fn webrtc_post_offer(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<WebrtcSdpBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    if state.webrtc_sessions.record_offer(&id, body.sdp_b64).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)))
+    }
+}
+
+pub async fn webrtc_post_answer(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<WebrtcSdpBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    if state.webrtc_sessions.record_answer(&id, body.sdp_b64).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)))
+    }
+}
+
+pub async fn webrtc_post_ice(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<WebrtcIceBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    if state.webrtc_sessions.record_ice(&id, body.candidate_json).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)))
+    }
+}
+
+pub async fn webrtc_get_session(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<crate::webrtc::Session>, (StatusCode, String)> {
+    check_auth(&state, &headers)?;
+    match state.webrtc_sessions.get(&id).await {
+        Some(s) => Ok(axum::Json(s)),
+        None => Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id))),
+    }
+}
+
 /// `GET /api/world/:node_id` — returns the latest world state for
 /// `node_id` as JSON. 404 when no observation has arrived yet (fresh
 /// connect; WorldObserver hasn't ticked). Read-only; no auth required
