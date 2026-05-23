@@ -148,6 +148,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/layout/:node_id", axum::routing::delete(api::delete_layout))
         .route("/api/events", get(api::events_handler))
         .route("/api/screenshot/:node_id", get(api::screenshot_handler))
+        .route("/api/world/:node_id", get(api::world_handler))
         .route("/shell/:node_id", get(api::shell_page))
         .route("/api/shell/ws/:node_id", get(api::shell_ws))
         .route("/assets/:name", get(asset_handler))
@@ -179,7 +180,15 @@ async fn index(
     let snapshot = state.registry.status_snapshot().await;
     let layout = state.layout.read().await.clone();
     let authed = api::is_authenticated(&state, &headers);
-    templates::page_with_layout(&snapshot, &layout, authed)
+    // Pull world states for every visible node in one pass; the
+    // template renders the focused-app name when present.
+    let mut world_map = std::collections::HashMap::new();
+    for s in &snapshot {
+        if let Some(w) = state.registry.world_state_for(&s.node_id).await {
+            world_map.insert(s.node_id.clone(), w);
+        }
+    }
+    templates::page_with_layout_and_world(&snapshot, &layout, &world_map, authed)
 }
 
 async fn sse_handler(

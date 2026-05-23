@@ -8,7 +8,7 @@ use futures::stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::dashboard::templates::nodes_rows_with_controls;
+use crate::dashboard::templates::{nodes_rows_with_controls, nodes_rows_with_controls_and_world};
 use crate::router::NodeRegistry;
 
 /// Build an SSE stream that emits a `<tbody>` fragment on every
@@ -30,33 +30,53 @@ pub fn stream(
 
     let initial_snapshot = async move {
         let snap = initial.status_snapshot().await;
+        let worlds = collect_worlds(&initial, &snap).await;
         Ok(Event::default()
             .event("nodes")
-            .data(nodes_rows_with_controls(&snap, authed).into_string()))
+            .data(
+                nodes_rows_with_controls_and_world(&snap, &worlds, authed)
+                    .into_string(),
+            ))
     };
     let initial_stream = futures::stream::once(initial_snapshot);
 
-    // On every event (including Lagged), re-render the full snapshot. Each
-    // broadcast item produces one render — there is no per-tick coalescing
-    // here. We accept the work cost because each render reflects the latest
-    // state at the moment it runs, so a burst of N events emits N
-    // identical-looking fragments and the client converges quickly. If this
-    // ever becomes a perf bottleneck, wrap the stream in `.ready_chunks(N)`
-    // or `.throttle(...)` to debounce.
+    // On every event (including Lagged), re-render the full snapshot.
+    // World-state changes also fire events (NodeEvent::WorldChanged
+    // via PR #49) so the focused cell stays fresh.
     let rx = registry.subscribe();
     let updates = BroadcastStream::new(rx).then(move |_msg| {
         let registry = rx_registry.clone();
         async move {
             let snap = registry.status_snapshot().await;
+            let worlds = collect_worlds(&registry, &snap).await;
             Ok(Event::default()
                 .event("nodes")
-                .data(nodes_rows_with_controls(&snap, authed).into_string()))
+                .data(
+                    nodes_rows_with_controls_and_world(&snap, &worlds, authed)
+                        .into_string(),
+                ))
         }
     });
 
     let combined = initial_stream.chain(updates);
 
     Sse::new(combined).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+/// Build the world-state map for every visible node in one pass.
+/// Lifts the same logic the index handler uses into a helper so SSE
+/// renders see fresh focused-app info on every broadcast.
+async fn collect_worlds(
+    registry: &Arc<NodeRegistry>,
+    snap: &[crate::events::NodeStatus],
+) -> std::collections::HashMap<String, kestrel_proto::WorldState> {
+    let mut worlds = std::collections::HashMap::new();
+    for s in snap {
+        if let Some(w) = registry.world_state_for(&s.node_id).await {
+            worlds.insert(s.node_id.clone(), w);
+        }
+    }
+    worlds
 }
 
 #[cfg(test)]

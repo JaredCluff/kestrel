@@ -139,6 +139,24 @@ pub async fn events_handler(
     events_stream(registry)
 }
 
+/// `GET /api/world/:node_id` — returns the latest world state for
+/// `node_id` as JSON. 404 when no observation has arrived yet (fresh
+/// connect; WorldObserver hasn't ticked). Read-only; no auth required
+/// (matches the rest of the read-only API surface — `/api/nodes`,
+/// `/api/events`).
+pub async fn world_handler(
+    State(registry): State<Arc<NodeRegistry>>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+) -> Result<axum::Json<kestrel_proto::WorldState>, (StatusCode, String)> {
+    match registry.world_state_for(&node_id).await {
+        Some(state) => Ok(axum::Json(state)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("no world state cached for '{}' (observer hasn't ticked yet)", node_id),
+        )),
+    }
+}
+
 /// TTL for cached screenshots. After this, a fetch triggers a fresh
 /// capture from the agent. Operators viewing the dashboard see at most
 /// `SCREENSHOT_TTL` of staleness per node — generous enough to keep

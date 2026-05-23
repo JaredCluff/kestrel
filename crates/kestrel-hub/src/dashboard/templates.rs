@@ -1,8 +1,11 @@
 // crates/kestrel-hub/src/dashboard/templates.rs
 use maud::{DOCTYPE, Markup, html};
 
+use std::collections::HashMap;
+
 use crate::config::NodeLayout;
 use crate::events::{NodeState, NodeStatus};
+use kestrel_proto::WorldState;
 
 /// Full dashboard page. `authed` controls whether write controls (Add /
 /// Remove forms, Sign-out button) are rendered: read-only viewers see no
@@ -10,14 +13,26 @@ use crate::events::{NodeState, NodeStatus};
 /// sign-out link in the header always renders and points the other way
 /// from the current state.
 pub fn page(nodes: &[NodeStatus], authed: bool) -> Markup {
-    page_inner(nodes, &[], authed, None)
+    page_inner(nodes, &[], &HashMap::new(), authed, None)
 }
 
 /// Variant of `page` that also renders the KVM grid layout column +
 /// the layout-set form. Used by the index handler which has access to
 /// the live SharedLayout.
 pub fn page_with_layout(nodes: &[NodeStatus], layout: &[NodeLayout], authed: bool) -> Markup {
-    page_inner(nodes, layout, authed, None)
+    page_inner(nodes, layout, &HashMap::new(), authed, None)
+}
+
+/// Variant of `page_with_layout` that additionally renders the
+/// per-row "Focused" cell from the world-state cache. Used by the
+/// index handler after Phase 6 (PR #50) makes the cache available.
+pub fn page_with_layout_and_world(
+    nodes: &[NodeStatus],
+    layout: &[NodeLayout],
+    worlds: &HashMap<String, WorldState>,
+    authed: bool,
+) -> Markup {
+    page_inner(nodes, layout, worlds, authed, None)
 }
 
 /// Same page, but with an inline error message banner above the table.
@@ -25,12 +40,13 @@ pub fn page_with_layout(nodes: &[NodeStatus], layout: &[NodeLayout], authed: boo
 /// etc.) so the operator stays on the dashboard with feedback rather
 /// than being bounced to a separate error page.
 pub fn page_with_error(nodes: &[NodeStatus], authed: bool, error: &str) -> Markup {
-    page_inner(nodes, &[], authed, Some(error))
+    page_inner(nodes, &[], &HashMap::new(), authed, Some(error))
 }
 
 fn page_inner(
     nodes: &[NodeStatus],
     layout: &[NodeLayout],
+    worlds: &HashMap<String, WorldState>,
     authed: bool,
     error: Option<&str>,
 ) -> Markup {
@@ -68,7 +84,7 @@ fn page_inner(
                     }
                     table hx-ext="sse" sse-connect="/sse" {
                         tbody sse-swap="nodes" {
-                            (nodes_rows_with_controls(nodes, authed))
+                            (nodes_rows_with_controls_and_world(nodes, worlds, authed))
                         }
                     }
                     @if authed {
@@ -241,7 +257,33 @@ pub fn login_page(error: Option<&str>) -> Markup {
 /// re-renders pick up fresh screenshots; the server enforces a TTL
 /// (see api::SCREENSHOT_TTL) so the cache-bust doesn't translate
 /// into per-render screenshot calls.
+/// Truncate a UTF-8 string to at most `n` characters (not bytes),
+/// appending an ellipsis when truncation actually happens. Safe for
+/// any input — including all-multi-byte strings — because we operate
+/// on `char`s, not byte indices.
+fn truncate(s: &str, n: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = chars.into_iter().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
 pub fn nodes_rows_with_controls(nodes: &[NodeStatus], authed: bool) -> Markup {
+    nodes_rows_with_controls_and_world(nodes, &HashMap::new(), authed)
+}
+
+/// Variant that also renders the per-row "Focused" cell from a
+/// world-state map. Used by the dashboard's index render after
+/// Phase 6 (PR #50) makes the cache available.
+pub fn nodes_rows_with_controls_and_world(
+    nodes: &[NodeStatus],
+    worlds: &HashMap<String, WorldState>,
+    authed: bool,
+) -> Markup {
     // ts is computed once per render so all rows share it (which means
     // browsers can cache identical images within one render snapshot).
     let ts = std::time::SystemTime::now()
@@ -250,7 +292,11 @@ pub fn nodes_rows_with_controls(nodes: &[NodeStatus], authed: bool) -> Markup {
         .unwrap_or(0);
     let actions_cols = if authed { 1 } else { 0 };
     let shot_cols = if authed { 1 } else { 0 };
-    let total_cols = 3 + actions_cols + shot_cols;
+    // Focused-cell column is always present (read-only viewers can
+    // see what app is in focus on each machine; nothing leak-y about
+    // an app name in a typical fleet).
+    let focused_cols = 1;
+    let total_cols = 3 + actions_cols + shot_cols + focused_cols;
     html! {
         @if nodes.is_empty() {
             tr {
@@ -265,6 +311,22 @@ pub fn nodes_rows_with_controls(nodes: &[NodeStatus], authed: bool) -> Markup {
                             NodeState::Online        => span.online   { "online" },
                             NodeState::Reconnecting  => span          { "reconnecting" },
                             NodeState::Offline       => span          { "offline" },
+                        }
+                    }
+                    td.focused {
+                        // World-state focused app, if observed. We
+                        // truncate the name to keep the column from
+                        // dominating the row layout. Title fallback
+                        // when the agent didn't surface a window
+                        // title (most platforms don't yet).
+                        @if let Some(w) = worlds.get(&n.node_id) {
+                            @if let Some(app) = &w.focused_app {
+                                span.app { (truncate(&app.name, 24)) }
+                            } @else {
+                                span.muted { "—" }
+                            }
+                        } @else {
+                            span.muted { "—" }
                         }
                     }
                     td.latency {
