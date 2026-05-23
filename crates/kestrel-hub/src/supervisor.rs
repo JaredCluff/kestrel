@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 use crate::config::NodeConfig;
 use crate::router::NodeRegistry;
@@ -24,12 +25,16 @@ fn backoff_for(attempt: u32) -> Duration {
 pub fn spawn(
     node_cfg: NodeConfig,
     registry: Arc<NodeRegistry>,
-    master_secret: Vec<u8>,
+    master_secret: Zeroizing<Vec<u8>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         // Derive once per supervisor lifetime — node_id and master are both
         // fixed for the lifetime of this task. Reconnects use the same PSK.
-        let psk = kestrel_proto::derive_per_node_psk(&master_secret, &node_cfg.node_id);
+        // The derived PSK is also Zeroizing so it gets wiped when the
+        // supervisor task ends (or the hub process exits).
+        let psk = Zeroizing::new(
+            kestrel_proto::derive_per_node_psk(&master_secret, &node_cfg.node_id),
+        );
         let mut attempt: u32 = 0;
         loop {
             if attempt > 0 {
@@ -41,7 +46,7 @@ pub fn spawn(
                 registry.mark_reconnecting(&node_cfg.node_id, 0).await;
             }
 
-            match transport::connect(node_cfg.address, &psk).await {
+            match transport::connect(node_cfg.address, &*psk).await {
                 Ok((mut handle, actor_join)) => {
                     // Verify the agent's claimed hostname matches the
                     // configured node_id. A typo in kestrel.toml pointing one

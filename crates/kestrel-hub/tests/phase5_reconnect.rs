@@ -11,8 +11,8 @@ use kestrel_hub::supervisor;
 
 /// Hub-side master secret for tests. The supervisor receives this; each
 /// agent in a test receives only its own HKDF-derived per-node PSK.
-fn test_master_secret() -> Vec<u8> {
-    b"kestrel-test-master-32bytes-pad!".to_vec()
+fn test_master_secret() -> zeroize::Zeroizing<Vec<u8>> {
+    zeroize::Zeroizing::new(b"kestrel-test-master-32bytes-pad!".to_vec())
 }
 
 /// Per-node PSK derivation matching what the production supervisor does on

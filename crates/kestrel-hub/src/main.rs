@@ -254,11 +254,13 @@ async fn main() -> anyhow::Result<()> {
 
             // Spawn one supervisor per configured node. Each supervisor handles its own
             // (re)connection lifecycle and emits status events to the registry's broadcast.
+            // master_secret was loaded as Zeroizing<Vec<u8>>; AppState consumed one copy
+            // and we hand each supervisor its own zeroize-wrapped clone.
             for node in &cfg.nodes {
                 let handle = supervisor::spawn(
                     node.clone(),
                     registry.clone(),
-                    master_secret.clone(),
+                    state.master_secret.clone(),
                 );
                 state.supervisors.write().await.insert(node.node_id.clone(), handle);
                 println!("supervising: {} ({})", node.node_id, node.address);
