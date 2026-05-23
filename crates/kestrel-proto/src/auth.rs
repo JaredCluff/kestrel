@@ -15,6 +15,13 @@ pub const AUTH_EXPORTER_LABEL: &[u8] = b"kestrel auth v1";
 /// silently colliding with an old install's derived keys.
 pub const NODE_PSK_INFO_PREFIX: &[u8] = b"kestrel-node-psk-v1:";
 
+/// HKDF info string used to derive the hub dashboard's session-signing
+/// key from the master secret. A separate prefix here means the key used
+/// to sign browser session cookies is cryptographically distinct from any
+/// per-node PSK, so an attacker who somehow learned a per-node PSK still
+/// cannot forge session cookies (and vice versa).
+pub const SESSION_SIGNING_INFO: &[u8] = b"kestrel-session-signing-v1";
+
 /// Derive a per-node PSK from a hub-side master secret and a node identifier.
 ///
 /// Uses HKDF-SHA256 with the master_secret as IKM, an empty salt, and an
@@ -36,6 +43,22 @@ pub fn derive_per_node_psk(master_secret: &[u8], node_id: &str) -> [u8; 32] {
     info.extend_from_slice(node_id.as_bytes());
     let mut out = [0u8; 32];
     hk.expand(&info, &mut out)
+        .expect("32-byte output is well under HKDF-SHA256's L*HashLen=255*32 cap");
+    out
+}
+
+/// Derive the hub dashboard's session-signing key from the master secret.
+///
+/// HKDF-SHA256 with `SESSION_SIGNING_INFO` as the domain-separating info
+/// parameter. The resulting 32-byte key is used by the dashboard to sign
+/// and verify browser session cookies. It's distinct from every per-node
+/// PSK (different info string), and rotates automatically whenever the
+/// master secret rotates — `kestrel-hub init` followed by re-enrolling
+/// agents also invalidates every outstanding session cookie.
+pub fn derive_session_signing_key(master_secret: &[u8]) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, master_secret);
+    let mut out = [0u8; 32];
+    hk.expand(SESSION_SIGNING_INFO, &mut out)
         .expect("32-byte output is well under HKDF-SHA256's L*HashLen=255*32 cap");
     out
 }
@@ -188,6 +211,32 @@ mod tests {
         let nonce = [0x7Au8; 32];
         let mac = hmac_response(&hub_view, &nonce, EXPORTER_A);
         assert!(verify_response(&agent_view, &nonce, EXPORTER_A, &mac));
+    }
+
+    #[test]
+    fn session_signing_key_is_distinct_from_any_node_psk() {
+        // Domain-separation property: a session signing key and any per-node
+        // PSK derived from the same master MUST be different keys. If they
+        // weren't, learning a node's PSK would also let you forge session
+        // cookies.
+        let master = b"master";
+        let session = derive_session_signing_key(master);
+        for node_id in ["", "alpha", "beta", "kestrel-session-signing-v1"] {
+            let node_psk = derive_per_node_psk(master, node_id);
+            assert_ne!(
+                session, node_psk,
+                "session key collided with per-node PSK for node_id={:?}",
+                node_id
+            );
+        }
+    }
+
+    #[test]
+    fn session_signing_key_is_deterministic_and_master_specific() {
+        let m1 = b"master-one";
+        let m2 = b"master-two";
+        assert_eq!(derive_session_signing_key(m1), derive_session_signing_key(m1));
+        assert_ne!(derive_session_signing_key(m1), derive_session_signing_key(m2));
     }
 
     #[test]

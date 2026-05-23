@@ -101,3 +101,42 @@ td.empty {
     padding: 24px 0;
     text-align: center;
 }
+
+/* Login form — minimal, matches the rest of the aesthetic. */
+form {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+}
+
+form input[type="password"] {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--divider);
+    font: inherit;
+}
+
+form input[type="password"]:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+form button {
+    padding: 8px 16px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--divider);
+    font: inherit;
+    cursor: pointer;
+}
+
+form button:hover {
+    border-color: var(--accent);
+}
+
+p.error {
+    color: var(--accent);
+    margin-top: 16px;
+}
