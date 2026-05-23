@@ -4,11 +4,17 @@ Rust-native fleet control: TLS WebSocket transport, MCP-compatible operator hub,
 
 ## Security model
 
-Hub↔agent uses TLS WebSocket with a one-direction PSK-HMAC challenge-response (the agent challenges the hub), **bound to the TLS session via the TLS-exporter**. The agent generates a one-shot self-signed cert at startup (not pinned); a LAN MITM that terminates TLS on each leg sees a different exporter than the legitimate endpoint, so the proxied MAC won't verify on the far side and the connection dies. The PSK is in your system keyring (`kestrel-hub init` / `kestrel-agent enroll` puts it there).
+Hub↔agent uses TLS WebSocket with a one-direction PSK-HMAC challenge-response (the agent challenges the hub), **bound to the TLS session via the TLS-exporter**. The agent generates a one-shot self-signed cert at startup (not pinned); a LAN MITM that terminates TLS on each leg sees a different exporter than the legitimate endpoint, so the proxied MAC won't verify on the far side and the connection dies.
+
+**Per-node PSKs.** The hub stores a single `master_secret` in its system keyring. Each agent's PSK is `HKDF-SHA256(master_secret, info = "kestrel-node-psk-v1:" || node_id)`. The master never leaves the hub; only the derived per-node PSK is given to its agent. Consequences:
+
+- A leaked agent PSK exposes only that one node — no other agent and not the master.
+- Rotating the master invalidates every agent enrollment in one step (re-run `init` then re-enroll).
+- Misconfiguration is self-detecting: an agent enrolled under `beta` cannot authenticate to a hub trying to reach it as `alpha`. Cross-node and cross-master PSK rejection are pinned by tests.
 
 The hub's dashboard at `:7273` is plain HTTP. Read-only endpoints (HTML dashboard, `/api/nodes` GET, `/api/events` SSE) are open. Mutation endpoints (`POST`/`DELETE /api/nodes`) require a Bearer control token from the keyring. LAN-only assumed for the dashboard host.
 
-**Out of scope (today):** mutual auth beyond the PSK, per-node PSKs, audit logging of MCP tool calls, dashboard TLS.
+**Out of scope (today):** mutual auth beyond the PSK, audit logging of MCP tool calls, dashboard TLS.
 
 ## Setup
 
@@ -22,15 +28,23 @@ On the hub host:
     # OR LAN/fleet — explicit bind + dashboard so other machines can reach you
     kestrel-hub init --bind 192.168.1.10 --dashboard 192.168.1.10:7273
 
-`init` generates PSK + control token (both stored in the keyring) and scaffolds `kestrel.toml`. It also prints an enrollment command for nodes. Copy that to each node and run:
+`init` generates a `master_secret` + a Bearer control token (both stored in the hub's system keyring) and scaffolds `kestrel.toml`. The per-node PSK for each agent is HKDF-derived from the master at `add-node` time, so the enrollment line varies per node.
 
-    cargo install --path crates/kestrel-agent
-    kestrel-agent enroll --hub <hub-ip> --key <hex-from-hub>
-
-Back on the hub, register each node and start the hub:
+Register each node, copy the printed enrollment line to that node's machine, and start the hub:
 
     kestrel-hub add-node macstudio 192.168.1.10:7272
-    kestrel-hub add-node linux-dev 192.168.1.20:7272
+    # → prints: kestrel-agent enroll --hub <hub-ip> --node-id macstudio --key <derived-hex>
+
+    cargo install --path crates/kestrel-agent
+    # On macstudio:
+    kestrel-agent enroll --hub 192.168.1.10 --node-id macstudio --key <derived-hex>
+
+You can re-derive a node's enrollment line at any time without rotating the fleet:
+
+    kestrel-hub key macstudio --bind 192.168.1.10
+
+Back on the hub:
+
     kestrel-hub status                         # one-shot reachability check
 
 > **Hot-reload:** `add-node` and `remove-node` apply live against a running hub
@@ -55,23 +69,38 @@ In another terminal (or another host):
 
 | Command | What it does |
 |---|---|
-| `init` | Generate PSK + control token, store both in keyring, scaffold `kestrel.toml` |
+| `init` | Generate `master_secret` + control token, store both in keyring, scaffold `kestrel.toml` |
 | `connect` | Connect to each configured node, print result, block until Ctrl-C (smoke test) |
 | `start` | Long-running: supervisors + KVM + dashboard + MCP-on-stdio |
-| `add-node <id> <addr>` | Append `[[hub.nodes]]` to config; applies live if hub is running |
+| `add-node <id> <addr>` | Append `[[hub.nodes]]`; applies live if hub is running; prints the agent enrollment line |
 | `remove-node <id>` | Remove a node from config; applies live if hub is running |
 | `list-nodes` | Print configured nodes |
+| `key <id> [--bind <ip>]` | Re-derive and print the agent enrollment line for `<id>` (deterministic — does not rotate) |
 | `status` | Probe each configured node (one ping per node) |
 | `layout-set <id> <col> <row>` | Set/update KVM grid position |
 | `layout-unset <id>` | Remove a KVM grid entry |
 | `tui [--hub URL]` | Interactive TUI against a running hub |
-| `unenroll [--yes] [--keep-config]` | Clear PSK + control token from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |
+| `unenroll [--yes] [--keep-config]` | Clear `master_secret` + control token (and legacy `psk` entry) from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |
 
 ### Agent
 
 | Command | What it does |
 |---|---|
-| `enroll --hub <ip> --key <hex>` | Store PSK + scaffold agent `kestrel.toml` |
+| `enroll --hub <ip> --node-id <id> --key <hex>` | Store per-node PSK + scaffold agent `kestrel.toml` |
 | `start` | Run the agent's WSS server |
 | `status` | Print loaded config + verify keyring PSK |
 | `unenroll [--yes] [--keep-config]` | Clear PSK from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |
+
+## Migrating from shared-PSK installs
+
+Older installs stored a single fleet-wide PSK under the `kestrel/psk` keyring entry and used the same key on every agent. New installs use a hub-side `master_secret` from which each agent's PSK is HKDF-derived per `node_id`. To migrate:
+
+1. **Hub:** `kestrel-hub unenroll --yes` (clears the legacy `kestrel/psk` and the control token).
+2. **Hub:** `kestrel-hub init --bind <hub-lan-ip>` (writes a fresh `master_secret` and prints next steps).
+3. **For each existing agent:**
+   - `kestrel-agent unenroll --yes` on the agent machine.
+   - `kestrel-hub key <node_id> --bind <hub-lan-ip>` on the hub — copy the printed enrollment line.
+   - Run it on the agent machine to re-enroll under the new derivation.
+4. **Hub:** `kestrel-hub start`.
+
+The `psk` keyring entry is best-effort-cleared by `unenroll` for older installs (NotFound is reported, not fatal). No on-disk `kestrel.toml` schema changed — only the keyring and the enrollment-line format.
