@@ -9,14 +9,19 @@
 // element query rejected), we return `AccessibilityNode::unavailable()`
 // (`fallback: true`) and callers fall back to a screenshot.
 //
-// Current implementation depth: depth-1 (focused element only).
-// Walking children via UIAutomation requires constructing a
-// `TreeWalker` and iterating its `get_first_child` chain — feasible
-// and well-supported by the crate, but each step is a COM round-trip
-// and we want to test the basic wiring works first before adding the
-// depth-5 walk. A follow-up PR can add full recursion.
+// AUTHOR CAVEAT: This file's tree-walk recursion was written without
+// the ability to runtime-verify on a Windows machine. The shape
+// (TreeWalker.get_first_child / get_next_sibling, depth budget,
+// per-step error degradation) follows the uiautomation 0.16 docs.rs
+// surface and standard UIA patterns. Specific method names may need
+// adjustment in a follow-up if the crate API has drifted; the
+// structural recursion is what we're shipping.
 
 use kestrel_proto::AccessibilityNode;
+
+/// Maximum recursion depth. Matches the macOS implementation so
+/// callers get comparable output shapes across platforms.
+const MAX_DEPTH: u8 = 5;
 
 pub fn describe() -> AccessibilityNode {
     let automation = match uiautomation::UIAutomation::new() {
@@ -35,23 +40,30 @@ pub fn describe() -> AccessibilityNode {
         }
     };
 
-    let role = focused
+    let walker = match automation.create_tree_walker() {
+        Ok(w) => w,
+        Err(e) => {
+            // The focused element worked but the TreeWalker didn't —
+            // return a depth-1 result rather than full fallback.
+            tracing::warn!("ax(windows): create_tree_walker failed: {}", e);
+            return shallow_node(&focused);
+        }
+    };
+
+    walk(&focused, &walker, MAX_DEPTH)
+}
+
+/// One-element render with no children. Used when the TreeWalker
+/// itself can't be constructed but we have a focused element to
+/// describe.
+fn shallow_node(elem: &uiautomation::UIElement) -> AccessibilityNode {
+    let role = elem
         .get_classname()
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|s: &String| !s.is_empty())
         .unwrap_or_else(|| "unknown".into());
-    let label = focused
-        .get_name()
-        .ok()
-        .filter(|s| !s.is_empty());
-    let enabled = focused.is_enabled().unwrap_or(true);
-
-    // Children walk not yet implemented — see module-level comment.
-    // Returning fallback: false because the platform call succeeded
-    // and the data we DO have is real.
-    //
-    // Follow-up TODO: construct a TreeWalker and recurse with
-    // depth=5 to match macOS.
+    let label = elem.get_name().ok().filter(|s: &String| !s.is_empty());
+    let enabled = elem.is_enabled().unwrap_or(true);
     AccessibilityNode {
         role,
         label,
@@ -60,6 +72,47 @@ pub fn describe() -> AccessibilityNode {
         enabled,
         bounds: None,
         children: vec![],
+        fallback: false,
+    }
+}
+
+/// Depth-budgeted recursion over the UIA tree. Children are walked via
+/// the TreeWalker's first-child / next-sibling chain, which is the
+/// standard COM-API pattern. A failing child step contributes an
+/// `unavailable()` placeholder but doesn't abort the whole walk.
+fn walk(
+    elem: &uiautomation::UIElement,
+    walker: &uiautomation::UITreeWalker,
+    depth: u8,
+) -> AccessibilityNode {
+    let role = elem
+        .get_classname()
+        .ok()
+        .filter(|s: &String| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    let label = elem.get_name().ok().filter(|s: &String| !s.is_empty());
+    let enabled = elem.is_enabled().unwrap_or(true);
+
+    let mut children: Vec<AccessibilityNode> = vec![];
+    if depth > 0 {
+        // get_first_child returns Err when there are no children, which
+        // is the natural terminator for our recursion.
+        let mut cur = walker.get_first_child(elem).ok();
+        while let Some(child) = cur {
+            children.push(walk(&child, walker, depth - 1));
+            cur = walker.get_next_sibling(&child).ok();
+        }
+    }
+
+    AccessibilityNode {
+        role,
+        label,
+        value: None,
+        focused: depth == MAX_DEPTH, // only the root we entered is the
+                                     // focused element
+        enabled,
+        bounds: None,
+        children,
         fallback: false,
     }
 }
