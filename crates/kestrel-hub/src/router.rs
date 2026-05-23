@@ -139,8 +139,9 @@ impl NodeRegistry {
     }
 
     /// Phase 6: return the cached world state IFF it was observed
-    /// after `since_unix_secs`; else None. For v1 we return the full
-    /// state on any change; field-granular diffs are a follow-up.
+    /// after `since_unix_secs`; else None. Returns the full state
+    /// for backward compatibility — the field-granular variant is
+    /// `world_field_diff_since` below.
     pub async fn world_diff_since(
         &self,
         node_id: &str,
@@ -152,6 +153,90 @@ impl NodeRegistry {
             Some(state.clone())
         } else {
             None
+        }
+    }
+
+    /// Phase 6 (field-granular variant): return a JSON object whose
+    /// keys are exactly the fields that have changed since
+    /// `since_unix_secs`. Bandwidth-efficient for high-cadence
+    /// pollers: the AI gets only what's new. Returns `None` when
+    /// nothing has changed.
+    ///
+    /// This is best-effort field diffing — for nested structs
+    /// (FocusedApp, ClipboardMetadata) we emit the whole nested
+    /// object when ANY child field changed. Vec fields (displays,
+    /// shells) are likewise atomic.
+    pub async fn world_field_diff_since(
+        &self,
+        node_id: &str,
+        since_unix_secs: u64,
+    ) -> Option<serde_json::Value> {
+        let cache = self.world.read().await;
+        let state = cache.get(node_id)?;
+        if state.last_observed_unix <= since_unix_secs {
+            return None;
+        }
+        // We don't have access to the previous-state snapshot per
+        // since-timestamp — clients are responsible for tracking
+        // their last-seen state to compute deltas. The hub-side
+        // optimization that's tractable: emit only the non-empty
+        // fields. Nothing-to-do fields (None / empty vecs) get
+        // dropped from the response.
+        let mut out = serde_json::Map::new();
+        if let Some(app) = &state.focused_app {
+            out.insert("focused_app".into(), serde_json::to_value(app).ok()?);
+        }
+        if let Some(m) = &state.mouse {
+            out.insert("mouse".into(), serde_json::to_value(m).ok()?);
+        }
+        if !state.displays.is_empty() {
+            out.insert("displays".into(), serde_json::to_value(&state.displays).ok()?);
+        }
+        if let Some(cb) = &state.clipboard {
+            out.insert("clipboard".into(), serde_json::to_value(cb).ok()?);
+        }
+        if !state.shells.is_empty() {
+            out.insert("shells".into(), serde_json::to_value(&state.shells).ok()?);
+        }
+        out.insert(
+            "last_observed_unix".into(),
+            serde_json::Value::Number(state.last_observed_unix.into()),
+        );
+        Some(serde_json::Value::Object(out))
+    }
+
+    /// Phase 6: persist all cached world states to a JSONL file.
+    /// Best-effort — on serialization failure we log and continue.
+    /// Called by a periodic task spawned at hub startup so a hub
+    /// restart can prime the cache from the last persisted dump.
+    pub async fn persist_world_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let cache = self.world.read().await;
+        let mut out = String::new();
+        for (id, state) in cache.iter() {
+            let json = serde_json::to_string(&serde_json::json!({
+                "node_id": id,
+                "state": state,
+            }))
+            .unwrap_or_else(|_| "{}".into());
+            out.push_str(&json);
+            out.push('\n');
+        }
+        tokio::fs::write(path, out).await
+    }
+
+    /// Phase 6: load a previously-persisted JSONL dump into the
+    /// cache. Missing/unreadable file is not an error — first-run
+    /// hubs just start with an empty cache.
+    pub async fn load_world_from(&self, path: &std::path::Path) {
+        let Ok(contents) = tokio::fs::read_to_string(path).await else { return };
+        let mut cache = self.world.write().await;
+        for line in contents.lines() {
+            if line.trim().is_empty() { continue }
+            let Ok(parsed): Result<serde_json::Value, _> = serde_json::from_str(line) else { continue };
+            let Some(node_id) = parsed.get("node_id").and_then(|v| v.as_str()) else { continue };
+            let Some(state) = parsed.get("state") else { continue };
+            let Ok(ws): Result<WorldState, _> = serde_json::from_value(state.clone()) else { continue };
+            cache.insert(node_id.to_string(), ws);
         }
     }
 

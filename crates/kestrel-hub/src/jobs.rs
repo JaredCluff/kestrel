@@ -91,6 +91,10 @@ pub struct JobRegistry {
     /// agent calls (shell_run, screenshot, etc.) from job spawn
     /// tasks. The same Arc the rest of the hub shares.
     node_registry: Arc<NodeRegistry>,
+    /// Per-job abort handles. `job_cancel` calls `.abort()` to
+    /// terminate the spawn task; the task observes the cancellation
+    /// at its next .await point.
+    handles: Arc<RwLock<std::collections::HashMap<JobId, tokio::task::AbortHandle>>>,
 }
 
 impl JobRegistry {
@@ -98,6 +102,7 @@ impl JobRegistry {
         Self {
             inner: Arc::new(RwLock::new(std::collections::HashMap::new())),
             node_registry,
+            handles: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -124,9 +129,11 @@ impl JobRegistry {
         // Spawn the worker. Flip Pending -> Running, do the call,
         // flip to Completed / Failed.
         let inner = self.inner.clone();
+        let handles = self.handles.clone();
         let registry = self.node_registry.clone();
         let job_id_for_task = job_id.clone();
-        tokio::spawn(async move {
+        let job_id_for_handle = job_id.clone();
+        let task = tokio::spawn(async move {
             {
                 let mut map = inner.write().await;
                 if let Some(j) = map.get_mut(&job_id_for_task) {
@@ -136,7 +143,6 @@ impl JobRegistry {
             let result = registry.run_shell(&node_id, &command).await;
             let mut map = inner.write().await;
             if let Some(j) = map.get_mut(&job_id_for_task) {
-                // Already-cancelled jobs stay Cancelled.
                 if j.status == JobStatus::Cancelled {
                     return;
                 }
@@ -154,6 +160,12 @@ impl JobRegistry {
                 }
             }
         });
+        // Track the AbortHandle so `cancel()` can actually terminate
+        // the spawn task at its next await point.
+        {
+            let mut h = handles.write().await;
+            h.insert(job_id_for_handle, task.abort_handle());
+        }
 
         job_id
     }
@@ -184,12 +196,18 @@ impl JobRegistry {
         Some((chunk, new_offset))
     }
 
-    /// Mark a job as Cancelled. Doesn't actually abort the
-    /// underlying agent operation — that would require per-job
-    /// cancellation tokens which is a follow-up. For shell jobs
-    /// specifically the 30-second timeout in NodeRegistry::run_shell
-    /// caps the runaway.
+    /// Mark a job as Cancelled AND abort its spawn task. The abort
+    /// lands at the next await point inside the task — which is
+    /// either inside the registry call (so the request is dropped)
+    /// or already past, in which case it just bails out without
+    /// recording results. The underlying agent operation may still
+    /// run to completion on its side; the 30s shell_run timeout
+    /// caps any runaway.
     pub async fn cancel(&self, job_id: &str) -> bool {
+        // Abort the spawn task first.
+        if let Some(handle) = self.handles.write().await.remove(job_id) {
+            handle.abort();
+        }
         let mut map = self.inner.write().await;
         match map.get_mut(job_id) {
             Some(j) if matches!(j.status, JobStatus::Pending | JobStatus::Running) => {

@@ -130,24 +130,32 @@ impl WorldObserver {
         // Per-platform observation. Each helper returns `None` on
         // failure, which degrades that field rather than aborting
         // the whole snapshot.
-        let focused_app = current_focused_app();
-        let mouse = current_mouse_position();
-        let clipboard = current_clipboard_metadata();
-        WorldState {
-            focused_app,
-            mouse,
-            displays: self.displays.clone(),
-            clipboard,
-            // Shell-session tracking is deferred to PR-6.3's hub-side
-            // tracking — the agent doesn't have a clean view of what's
-            // buffered hub-side anyway. Empty vec for v1; populated in
-            // a follow-up if there's demand.
-            shells: vec![],
-            last_observed_unix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        }
+        //
+        // CRITICAL: focused_app and clipboard query OS APIs that
+        // can briefly block (NSWorkspace lock, AppKit pasteboard
+        // lock). On a current_thread tokio runtime those blocks
+        // would stall every other task — including the WS reader
+        // that handles ping/pong, which we saw add 1700ms RTT to
+        // a Phase-8 regression. Run them on the blocking pool.
+        let displays = self.displays.clone();
+        tokio::task::spawn_blocking(move || {
+            let focused_app = current_focused_app();
+            let mouse = current_mouse_position();
+            let clipboard = current_clipboard_metadata();
+            WorldState {
+                focused_app,
+                mouse,
+                displays,
+                clipboard,
+                shells: vec![],
+                last_observed_unix: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| WorldState::empty())
     }
 }
 

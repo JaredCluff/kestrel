@@ -46,9 +46,9 @@ pub struct WorkflowStep {
     pub node: Option<String>,
     #[serde(default)]
     pub needs: Option<CapabilityNeeds>,
-    /// Op to invoke. Supported in v1: "shell_run", "screenshot",
-    /// "world_state", "describe". Other ops can be added; each one
-    /// is wired explicitly in `run_step` for now.
+    /// Op to invoke. Supported ops: "shell_run", "screenshot",
+    /// "world_state", "describe", "type_text", "key_combo",
+    /// "clipboard_read", "clipboard_write".
     pub op: String,
     /// Op-specific args. For `shell_run`, expects {"command": "..."}.
     #[serde(default)]
@@ -57,6 +57,12 @@ pub struct WorkflowStep {
     /// move on) or "fail" (abort the whole workflow). Default: fail.
     #[serde(default = "default_on_error")]
     pub on_error: OnError,
+    /// Phase 9 follow-up: conditional execution. If set, the step is
+    /// skipped unless the named earlier step's status matches `when`.
+    /// Format: "step_name == ok", "step_name == error",
+    /// "step_name != ok". Comparison is on the literal status string.
+    #[serde(default)]
+    pub when: Option<String>,
 }
 
 fn default_on_error() -> OnError { OnError::Fail }
@@ -108,8 +114,25 @@ pub async fn run(
     let mut results: Vec<StepResult> = Vec::with_capacity(steps.len());
     let mut overall = WorkflowStatus::Ok;
 
+    let mut step_statuses: HashMap<String, StepStatus> = HashMap::new();
     let fut = async {
         for step in steps {
+            // Evaluate `when` predicate against earlier step statuses.
+            if let Some(cond) = &step.when {
+                if !eval_when(cond, &step_statuses) {
+                    let result = StepResult {
+                        name: step.name.clone(),
+                        status: StepStatus::Skipped,
+                        output: None,
+                        error: None,
+                        node_id: None,
+                        duration_ms: 0,
+                    };
+                    step_statuses.insert(step.name.clone(), StepStatus::Skipped);
+                    results.push(result);
+                    continue;
+                }
+            }
             // Substitute ${name.output} references using captured map.
             let args_str = step.args.to_string();
             let substituted = substitute(&args_str, &captured);
@@ -181,6 +204,7 @@ pub async fn run(
                     }
                 }
             }
+            step_statuses.insert(step.name.clone(), result.status);
             results.push(result);
         }
     };
@@ -232,7 +256,59 @@ async fn run_step(
             let tree = registry.describe(node_id, 0).await?;
             Ok(serde_json::to_string(&tree).unwrap_or_default())
         }
+        "type_text" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("type_text: missing string `text` arg"))?;
+            registry.type_text(node_id, text.into()).await?;
+            Ok("ok".into())
+        }
+        "clipboard_read" => {
+            let content = registry.clipboard_read(node_id).await?;
+            Ok(serde_json::to_string(&content).unwrap_or_default())
+        }
+        "clipboard_write" => {
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("clipboard_write: missing string `text` arg"))?;
+            registry
+                .clipboard_write(node_id, kestrel_proto::ClipboardContent::Text(text.into()))
+                .await?;
+            Ok("ok".into())
+        }
         other => anyhow::bail!("workflow op '{}' not supported", other),
+    }
+}
+
+/// Evaluate a `when` predicate against the recorded step statuses.
+/// Format: `<step_name> <op> <status>` where op is `==` or `!=` and
+/// status is one of `ok`, `error`, `skipped`. Anything malformed
+/// evaluates to false (step skipped) — fail-closed semantics.
+fn eval_when(cond: &str, statuses: &HashMap<String, StepStatus>) -> bool {
+    let cond = cond.trim();
+    let (lhs, op, rhs) = if let Some((l, r)) = cond.split_once("==") {
+        (l.trim(), "==", r.trim())
+    } else if let Some((l, r)) = cond.split_once("!=") {
+        (l.trim(), "!=", r.trim())
+    } else {
+        return false;
+    };
+    let status = match statuses.get(lhs) {
+        Some(s) => s,
+        None => return false, // referenced step didn't run
+    };
+    let want = match rhs {
+        "ok" => StepStatus::Ok,
+        "error" => StepStatus::Error,
+        "skipped" => StepStatus::Skipped,
+        _ => return false,
+    };
+    match op {
+        "==" => *status == want,
+        "!=" => *status != want,
+        _ => false,
     }
 }
 
@@ -279,6 +355,7 @@ mod tests {
             op: "world_state".into(),
             args: serde_json::json!({}),
             on_error: OnError::Continue,
+            when: None,
         };
         let res = run(&reg, vec![step], Duration::from_secs(5)).await;
         assert_eq!(res.status, WorkflowStatus::PartialError);
@@ -297,6 +374,7 @@ mod tests {
                 op: "world_state".into(),
                 args: serde_json::json!({}),
                 on_error: OnError::Fail,
+                when: None,
             },
             WorkflowStep {
                 name: "never_runs".into(),
@@ -305,6 +383,7 @@ mod tests {
                 op: "world_state".into(),
                 args: serde_json::json!({}),
                 on_error: OnError::Continue,
+                when: None,
             },
         ];
         let res = run(&reg, steps, Duration::from_secs(5)).await;
