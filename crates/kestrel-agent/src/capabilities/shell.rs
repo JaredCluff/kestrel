@@ -5,7 +5,15 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use kestrel_proto::{KestrelMessage, MsgKind, Payload};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
+
+/// Capacity of the shell-output channel between PTY reader threads and the
+/// outbound WS sender. Bounded so a stalled hub (TCP backpressure, paused
+/// client) cannot OOM the agent by letting PTY output queue without limit.
+/// When full, the reader thread's `blocking_send` blocks the OS thread,
+/// which in turn stops draining the PTY — kernel pipe buffer fills, the
+/// PTY child blocks on its own writes. That's the desired backpressure.
+pub const SHELL_EVENT_CAPACITY: usize = 128;
 
 struct PtySession {
     master: Box<dyn portable_pty::MasterPty + Send>,
@@ -18,11 +26,11 @@ struct PtySession {
 pub struct ShellManager {
     sessions: Arc<Mutex<HashMap<u32, PtySession>>>,
     next_id: Arc<Mutex<u32>>,
-    event_tx: UnboundedSender<KestrelMessage>,
+    event_tx: Sender<KestrelMessage>,
 }
 
 impl ShellManager {
-    pub fn new(event_tx: UnboundedSender<KestrelMessage>) -> Self {
+    pub fn new(event_tx: Sender<KestrelMessage>) -> Self {
         ShellManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
@@ -71,7 +79,7 @@ impl ShellManager {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if event_tx
-                            .send(KestrelMessage {
+                            .blocking_send(KestrelMessage {
                                 stream_id: 0,
                                 kind: MsgKind::Event,
                                 payload: Payload::ShellOutput { pty_id: id, data: buf[..n].to_vec() },
@@ -84,7 +92,7 @@ impl ShellManager {
                 }
             }
             sessions.lock().unwrap().remove(&id);
-            let _ = event_tx.send(KestrelMessage {
+            let _ = event_tx.blocking_send(KestrelMessage {
                 stream_id: 0,
                 kind: MsgKind::Event,
                 payload: Payload::ShellClose { pty_id: id },
@@ -148,7 +156,7 @@ mod tests {
 
     #[test]
     fn shell_manager_spawn_and_receive_output() {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(SHELL_EVENT_CAPACITY);
         let mgr = ShellManager::new(event_tx);
         let pty_id = mgr.spawn(None, 80, 24).expect("spawn shell");
 

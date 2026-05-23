@@ -82,6 +82,17 @@ impl NodeRegistry {
         v
     }
 
+    /// Best-effort synchronous snapshot for callers that must NOT yield
+    /// (e.g. tests pinning "the row exists at this exact point in time, no
+    /// scheduler yields allowed in between"). Returns `None` if the lock is
+    /// currently held by a writer.
+    pub fn try_status_snapshot(&self) -> Option<Vec<NodeStatus>> {
+        let guard = self.status.try_read().ok()?;
+        let mut v: Vec<NodeStatus> = guard.values().cloned().collect();
+        v.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        Some(v)
+    }
+
     pub async fn mark_disconnected(&self, node_id: &str, attempt: u32, next_retry_in: Duration) {
         // Remove the dead handle so MCP calls fail fast.
         self.nodes.write().await.remove(node_id);

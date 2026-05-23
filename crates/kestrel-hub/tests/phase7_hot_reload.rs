@@ -233,9 +233,17 @@ listen_dashboard = "0.0.0.0:7273"
 
 #[tokio::test]
 async fn post_node_seeds_registry_before_returning() {
-    // Pass 6 fix: POST must seed the registry status synchronously before
-    // returning, so a follow-up GET /api/nodes sees the new row immediately
-    // (no race with the supervisor's mark_reconnecting).
+    // Pass 6 fix: POST must seed the registry status synchronously *inside*
+    // the handler, before returning. Without that, a follow-up GET could miss
+    // the row while the supervisor task is still queued.
+    //
+    // Pass 11 strengthening: read via `try_status_snapshot()` (a sync,
+    // non-yielding read) instead of the async `status_snapshot().await`. If
+    // the seed call at `api.rs::post_node` were removed, the spawned
+    // supervisor task — which would otherwise seed the row at its first
+    // iteration — has NOT had a chance to run yet between `oneshot.await`
+    // returning and this sync read on the current_thread runtime. So this
+    // assertion would fail, pinning the synchronous-seed behavior.
     let dir = tempfile::tempdir().unwrap();
     let config_path = starter_toml(dir.path());
     let config_path_str = config_path.to_str().unwrap().to_string();
@@ -254,12 +262,14 @@ async fn post_node_seeds_registry_before_returning() {
     let resp = app.oneshot(post).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    // Immediately after the POST, the registry MUST already contain the row.
-    // No sleep, no yield — the seeding happened inside the handler.
-    let snap = registry.status_snapshot().await;
+    // Sync read — no scheduler yields between `oneshot().await` completing
+    // and this line, so the supervisor task cannot have run yet.
+    let snap = registry
+        .try_status_snapshot()
+        .expect("status RwLock should be uncontended right after POST returns");
     assert!(
         snap.iter().any(|s| s.node_id == "seeded"),
-        "registry should contain 'seeded' immediately after POST; got: {:?}",
+        "registry should contain 'seeded' synchronously after POST returns (no supervisor yield in between); got: {:?}",
         snap.iter().map(|s| &s.node_id).collect::<Vec<_>>()
     );
 }

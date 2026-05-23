@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{accept_async_with_config, tungstenite::Message, tungstenite::protocol::WebSocketConfig};
 
-use crate::capabilities::{clipboard, input, screen, shell::ShellManager};
+use crate::capabilities::{clipboard, input, screen, shell, shell::ShellManager};
 use crate::config::AgentConfig;
 
 /// Cap WebSocket message size to bound memory per frame. Screenshots are the
@@ -134,8 +134,12 @@ async fn handle_conn(
         },
     })?)).await?;
 
-    // Shell event channel
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<KestrelMessage>();
+    // Shell event channel — bounded so a stalled hub (TCP backpressure) can't
+    // let PTY output queue without limit and OOM the agent. The reader threads
+    // call `blocking_send`, which applies real backpressure to the PTY producer
+    // via the kernel pipe buffer.
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::channel::<KestrelMessage>(shell::SHELL_EVENT_CAPACITY);
     let shell_mgr = ShellManager::new(event_tx);
 
     // Message loop — select! on incoming frames and outgoing shell events
