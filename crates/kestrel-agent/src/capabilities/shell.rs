@@ -170,11 +170,18 @@ mod tests {
 
     #[test]
     fn shell_manager_spawn_and_receive_output() {
+        // PTY slave ttys have ECHO enabled by default, so the kernel echoes
+        // input bytes back through the master before the shell touches them.
+        // If we asserted on a literal substring that's also in the input, the
+        // assertion would pass even if /bin/sh were missing or never executed
+        // the command. Use arithmetic expansion so the assertion target
+        // ("TAG_77_END") only appears AFTER the shell evaluates $((7*11)).
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(SHELL_EVENT_CAPACITY);
         let mgr = ShellManager::new(event_tx);
         let pty_id = mgr.spawn(None, 80, 24).expect("spawn shell");
 
-        mgr.write(pty_id, b"echo kestrel-shell-test\nexit\n").expect("write to shell");
+        mgr.write(pty_id, b"printf 'TAG_%d_END\n' $((7*11))\nexit\n")
+            .expect("write to shell");
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let output = rt.block_on(async {
@@ -198,6 +205,10 @@ mod tests {
             }
             String::from_utf8_lossy(&buf).into_owned()
         });
-        assert!(output.contains("kestrel-shell-test"), "expected echo output in: {:?}", output);
+        assert!(
+            output.contains("TAG_77_END"),
+            "expected arithmetic-expanded 'TAG_77_END' in shell output, got: {:?}",
+            output
+        );
     }
 }
