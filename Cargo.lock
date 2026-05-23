@@ -2975,6 +2975,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uiautomation",
+ "x11rb",
  "xcap",
  "zeroize",
 ]

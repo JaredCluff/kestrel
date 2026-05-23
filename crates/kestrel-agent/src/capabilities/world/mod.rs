@@ -26,8 +26,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc::Sender;
 
 use kestrel_proto::{
-    ClipboardKind, ClipboardMetadata, DisplayInfo, FocusedApp, KestrelMessage, MousePosition,
-    MsgKind, Payload, ShellSession, WorldState,
+    Capabilities, ClipboardKind, ClipboardMetadata, DisplayInfo, FocusedApp, KestrelMessage,
+    MousePosition, MsgKind, Payload, ShellSession, WorldState,
 };
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -90,6 +90,27 @@ impl WorldObserver {
         })
     }
 
+    /// Phase 8 follow-up: emit a fresh Capabilities frame when the
+    /// observer detects a change worth re-broadcasting (e.g., display
+    /// plugged in, docker started). Best-effort: hub ignores
+    /// Capabilities frames that aren't different from the previous
+    /// one (the recording de-dupes).
+    pub async fn push_capabilities_now(&self) {
+        let caps = Capabilities {
+            os: std::env::consts::OS.into(),
+            has_gpu: false,
+            has_display: !self.displays.is_empty(),
+            has_sudo: false,
+            has_docker: docker_socket_present(),
+        };
+        let msg = KestrelMessage {
+            stream_id: 0,
+            kind: MsgKind::Event,
+            payload: Payload::Capabilities { caps },
+        };
+        let _ = self.event_tx.try_send(msg);
+    }
+
     /// Spawn the observation loop. Returns immediately; the loop runs
     /// until the underlying event channel closes (which happens when
     /// the connection's receiver side is dropped on disconnect), then
@@ -98,13 +119,21 @@ impl WorldObserver {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(OBSERVE_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Re-emit capabilities periodically so dynamic changes
+            // (docker started, display plugged in) are observable
+            // hub-side without restarting the agent. Hub-side
+            // record_capabilities() de-dupes against unchanged
+            // values so a re-send when nothing changed is cheap.
+            const CAP_REEMIT_EVERY: u64 = 15;
+            let mut cap_tick: u64 = 0;
             loop {
                 tick.tick().await;
-                // observe_and_maybe_send returns false when it detected
-                // a closed channel; that's our cue to wind the task
-                // down so we don't leak across reconnects.
                 if !self.observe_and_maybe_send().await {
                     break;
+                }
+                cap_tick = cap_tick.wrapping_add(1);
+                if cap_tick % CAP_REEMIT_EVERY == 0 {
+                    self.push_capabilities_now().await;
                 }
             }
         })
@@ -263,6 +292,15 @@ fn fingerprint(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let hex = format!("{:x}", digest);
     hex.chars().take(16).collect()
+}
+
+/// Cheap socket-existence probe (duplicates transport.rs's helper
+/// for cross-module reuse — the world observer doesn't depend on
+/// transport).
+fn docker_socket_present() -> bool {
+    ["/var/run/docker.sock", "/run/docker.sock"]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
 }
 
 /// Compute a screen fingerprint by sampling the primary display

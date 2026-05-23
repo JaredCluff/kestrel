@@ -30,7 +30,7 @@ async fn phase8_capabilities_flow_through_handshake() {
     // After a successful handshake, the agent's reported capabilities
     // are captured in the NodeHandle and visible via the registry.
     let addr = start_agent("cap-node").await;
-    let (handle, _actor, _world_rx) =
+    let (handle, _actor, _world_rx, _caps_rx) =
         connect_with_world_sink(addr, &test_psk()).await.unwrap();
     let caps = handle.capabilities.expect("handshake must capture caps");
     assert_eq!(caps.os, std::env::consts::OS);
@@ -98,7 +98,7 @@ async fn phase6_world_update_flows_through_supervisor_path() {
     // first WorldObserver tick fires at +2s).
     let addr = start_agent("world-node").await;
     let reg = Arc::new(NodeRegistry::new());
-    let (handle, actor, mut world_rx) =
+    let (handle, actor, mut world_rx, _caps_rx) =
         connect_with_world_sink(addr, &test_psk()).await.unwrap();
     reg.register(handle).await;
 
