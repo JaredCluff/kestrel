@@ -5,18 +5,32 @@ use kestrel_proto::Rect;
 use std::io::Cursor;
 use xcap::Monitor;
 
-/// Returns `(monitor_index, width_px, height_px)` for each display.
+/// Returns `(monitor_index, width_px, height_px)` for each display whose
+/// dimensions can be queried. **The `monitor_index` is the position in
+/// `xcap::Monitor::all()` (i.e. what `capture_display(idx)` will pass to
+/// `.nth(idx)`), NOT the filtered position.** Without this, a monitor whose
+/// `width()`/`height()` happened to fail would shift every subsequent
+/// monitor's reported id by one — and a `capture_display(2)` call would land
+/// on a different physical display than the one the hub validated against.
 pub fn list_displays() -> Vec<(usize, u32, u32)> {
-    Monitor::all()
-        .unwrap_or_default()
+    let monitors = match Monitor::all() {
+        Ok(m) => m,
+        Err(e) => {
+            // Surface this — operators staring at `displays: []` in the
+            // dashboard should be able to tell the difference between
+            // "really no monitors" and "xcap couldn't enumerate them".
+            tracing::warn!("xcap Monitor::all failed: {}", e);
+            return Vec::new();
+        }
+    };
+    monitors
         .into_iter()
-        .filter_map(|m| {
+        .enumerate()
+        .filter_map(|(idx, m)| {
             let w = m.width().ok()?;
             let h = m.height().ok()?;
-            Some((w, h))
+            Some((idx, w, h))
         })
-        .enumerate()
-        .map(|(i, (w, h))| (i, w, h))
         .collect()
 }
 

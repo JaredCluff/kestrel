@@ -21,10 +21,14 @@ use crate::config::AgentConfig;
 /// headroom while still preventing a malicious peer from forcing the agent
 /// to allocate hundreds of MB on a single bincode-decoded frame.
 fn ws_config() -> WebSocketConfig {
-    let mut cfg = WebSocketConfig::default();
-    cfg.max_message_size = Some(8 * 1024 * 1024);
-    cfg.max_frame_size = Some(8 * 1024 * 1024);
-    cfg
+    // `..Default::default()` rather than field-reassign-after-Default so
+    // future fields added by tungstenite upgrades inherit their library
+    // defaults instead of being silently dropped.
+    WebSocketConfig {
+        max_message_size: Some(8 * 1024 * 1024),
+        max_frame_size: Some(8 * 1024 * 1024),
+        ..Default::default()
+    }
 }
 
 fn make_tls_config() -> Arc<ServerConfig> {

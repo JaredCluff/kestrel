@@ -207,6 +207,74 @@ async fn count_disconnects(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn supervisor_uses_configured_node_id_when_agent_hostname_differs() {
+    // Pass-1 fix: a typo in kestrel.toml pointing one node's id at another
+    // node's host would silently register the agent under the WRONG identity
+    // because the PSK is shared across the fleet. Supervisor now compares the
+    // agent's self-reported hostname against the configured `node_id` and
+    // trusts the operator's config.
+    //
+    // This test was added in Pass 2 — the Pass-1 change had no test coverage
+    // because every other integration test happens to use the same id on
+    // both sides.
+    let (addr, agent) =
+        spawn_agent_on("agent-reports-this", "127.0.0.1:0".parse().unwrap());
+
+    let registry = Arc::new(NodeRegistry::new());
+    let mut rx = registry.subscribe();
+    let _sup = supervisor::spawn(
+        NodeConfig {
+            node_id: "operator-config".into(),
+            address: addr,
+        },
+        registry.clone(),
+        test_psk(),
+    );
+
+    // The Connected event MUST carry the operator's configured node_id, not
+    // the agent's self-reported hostname.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut got = false;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(NodeEvent::Connected { node_id, .. })) => {
+                assert_eq!(
+                    node_id, "operator-config",
+                    "supervisor must use the configured node_id, not the agent-reported hostname"
+                );
+                got = true;
+                break;
+            }
+            Ok(Ok(_)) => continue,
+            _ => break,
+        }
+    }
+    assert!(got, "did not observe a Connected event in time");
+
+    // Registry should also key by the configured id (the MCP dispatch + KVM
+    // routing both look up nodes by this string).
+    let snap = registry.status_snapshot().await;
+    assert!(
+        snap.iter().any(|s| s.node_id == "operator-config"),
+        "registry should contain the configured node_id; got {:?}",
+        snap.iter().map(|s| &s.node_id).collect::<Vec<_>>()
+    );
+    assert!(
+        !snap.iter().any(|s| s.node_id == "agent-reports-this"),
+        "registry must NOT contain the agent-reported hostname"
+    );
+
+    // Cleanup.
+    let shutdown_done = std::thread::spawn(move || agent.shutdown());
+    tokio::task::spawn_blocking(move || {
+        let _ = shutdown_done.join();
+    })
+    .await
+    .ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn supervisor_keeps_retrying_with_wrong_psk() {
     // Simulates an agent whose PSK has been rotated out-of-band: hub still
     // thinks the old PSK is valid; agent rejects every connection because the
@@ -229,10 +297,11 @@ async fn supervisor_keeps_retrying_with_wrong_psk() {
         test_psk(), // wrong PSK relative to the agent
     );
 
-    // First Disconnected should arrive almost immediately (auth fails on
-    // first connect). Second Disconnected should arrive after ~1s backoff.
-    // 8s window is enough for 2 retries even on a busy CI machine.
-    let count = count_disconnects(&mut rx, "psk-rotated", Duration::from_secs(8)).await;
+    // First Disconnected arrives almost immediately (auth fails on first
+    // connect). Subsequent: 1s, 2s, 4s, 8s, 16s, 30s cap. 12s window gives
+    // generous margin for 2 retries on slow CI; if this ever flakes raise to
+    // 15s before chasing a real bug.
+    let count = count_disconnects(&mut rx, "psk-rotated", Duration::from_secs(12)).await;
     assert!(
         count >= 2,
         "expected at least 2 Disconnected events from a wrong-PSK loop, got {}",

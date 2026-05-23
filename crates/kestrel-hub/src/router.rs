@@ -171,12 +171,18 @@ impl NodeRegistry {
         let mut mods = Modifiers::default();
         let mut non_modifiers: Vec<KeyCode> = Vec::new();
         for key in keys {
-            match key {
-                KeyCode::Control => mods.ctrl = true,
-                KeyCode::Shift => mods.shift = true,
-                KeyCode::Alt => mods.alt = true,
-                KeyCode::Meta => mods.meta = true,
-                other => non_modifiers.push(other),
+            // Partition with the shared is_modifier helper so both the
+            // proto-level definition and the router stay in sync.
+            if kestrel_proto::is_modifier(&key) {
+                match key {
+                    KeyCode::Control => mods.ctrl = true,
+                    KeyCode::Shift => mods.shift = true,
+                    KeyCode::Alt => mods.alt = true,
+                    KeyCode::Meta => mods.meta = true,
+                    _ => unreachable!("is_modifier returned true for a non-modifier KeyCode"),
+                }
+            } else {
+                non_modifiers.push(key);
             }
         }
 
@@ -277,14 +283,10 @@ mod tests {
         assert!(r.list_sync().is_empty());
     }
 
-    #[test]
-    fn registry_has_describe_method() {
-        let _: fn(&NodeRegistry, &str, u8) -> _ = |r: &NodeRegistry, id: &str, d: u8| {
-            let _ = r.describe(id, d);
-        };
-        let r = NodeRegistry::new();
-        assert!(r.list_sync().is_empty());
-    }
+    // `registry_has_describe_method` was a Phase 4 compile-check whose
+    // closure body created an unawaited Future and never asserted real
+    // behavior — `NodeRegistry::describe` is exercised by every test that
+    // calls the MCP `describe` tool through the registry. Removed in Pass 2.
 
     #[tokio::test]
     async fn subscribe_receives_disconnect_event() {

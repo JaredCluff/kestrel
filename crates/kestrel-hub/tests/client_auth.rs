@@ -61,9 +61,13 @@ async fn add_node_without_token_returns_401_error_with_hint() {
         .await
         .unwrap_err();
     let msg = err.to_string();
+    // HubClient::add_node / remove_node format failures as
+    // "hub returned 401 Unauthorized: <body>" — anchor the assertion to the
+    // exact 3-character status code so a coincidental match against a port
+    // number (or a different reqwest error format on upgrade) can't pass.
     assert!(
-        msg.contains("401") || msg.contains("Unauthorized"),
-        "expected 401/Unauthorized in error, got: {}",
+        msg.contains("hub returned 401"),
+        "expected 'hub returned 401' in error, got: {}",
         msg
     );
 }
@@ -77,9 +81,13 @@ async fn add_node_with_wrong_token_returns_401() {
         .await
         .unwrap_err();
     let msg = err.to_string();
+    // HubClient::add_node / remove_node format failures as
+    // "hub returned 401 Unauthorized: <body>" — anchor the assertion to the
+    // exact 3-character status code so a coincidental match against a port
+    // number (or a different reqwest error format on upgrade) can't pass.
     assert!(
-        msg.contains("401") || msg.contains("Unauthorized"),
-        "expected 401/Unauthorized in error, got: {}",
+        msg.contains("hub returned 401"),
+        "expected 'hub returned 401' in error, got: {}",
         msg
     );
 }
@@ -101,9 +109,13 @@ async fn remove_node_without_token_returns_401() {
     let client = HubClient::new(&base);
     let err = client.remove_node("alpha").await.unwrap_err();
     let msg = err.to_string();
+    // HubClient::add_node / remove_node format failures as
+    // "hub returned 401 Unauthorized: <body>" — anchor the assertion to the
+    // exact 3-character status code so a coincidental match against a port
+    // number (or a different reqwest error format on upgrade) can't pass.
     assert!(
-        msg.contains("401") || msg.contains("Unauthorized"),
-        "expected 401/Unauthorized in error, got: {}",
+        msg.contains("hub returned 401"),
+        "expected 'hub returned 401' in error, got: {}",
         msg
     );
 }
