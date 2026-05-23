@@ -20,6 +20,100 @@ The hub's dashboard at `:7273` is plain HTTP. Read-only endpoints (HTML dashboar
 
 **MCP audit log.** `kestrel-hub start --audit-log /var/log/kestrel.jsonl` appends one JSON Lines entry per MCP tool call (timestamp, tool, node_id, args summary, status, duration). `type_text`, `clipboard_write`, and `shell_write` log only the byte length of their text/data — never the bytes themselves; `shell_run` does log the command (highest-value audit signal).
 
+## Next-gen surface (Phases 6–13)
+
+Kestrel beyond the original Phase 1–5 MVP adds eight capability domains. Every MCP tool listed below is audited.
+
+### World state — `world_state` / `world_diff_since`
+
+The agent runs a `WorldObserver` that observes local state every ~2s (focused app, mouse position, clipboard fingerprint, displays, screen fingerprint via 8×8 luminance hash) and pushes deltas to the hub. The AI calls `world_state(node_id)` for a cheap JSON snapshot (~1–2 KB) and `world_diff_since(node_id, since_unix)` to get only what's new — no re-screenshotting needed to know "what app is on screen."
+
+Dashboard surface: each row gets a live "Focused" column; `GET /api/world/:id` returns the cached state as JSON.
+
+Schema: see `crates/kestrel-proto/src/world.rs`. Persistence to a JSONL dump across hub restarts is available via `NodeRegistry::persist_world_to` / `load_world_from`.
+
+### Async long-running jobs — `job_start_shell` / `job_status` / `job_output` / `job_cancel`
+
+Shell commands that take more than 30s block today's `shell_run`. Use the job pattern instead: `job_start_shell(node_id, command)` returns a job_id immediately; `job_status(job_id)` returns lifecycle (pending/running/completed/failed/cancelled); `job_output(job_id, since_offset)` streams output incrementally; `job_cancel(job_id)` aborts the spawn task.
+
+### Capability advertisement + smart routing — `fleet_find`
+
+Agents advertise `{os, has_gpu, has_display, has_sudo, has_docker}` in the handshake (after `SystemInfo`). The AI asks for a capability instead of hardcoding a `node_id`:
+
+```jsonc
+fleet_find({ has_gpu: true, has_display: true, os: "linux" })
+// → ["dev-box-1", "dev-box-3"]
+```
+
+### Workflow choreography — `workflow_run`
+
+Declarative cross-machine workflows. The AI specifies steps with targets (explicit `node` or capability `needs`), ops (`shell_run`, `screenshot`, `world_state`, `describe`, `type_text`, `clipboard_read`, `clipboard_write`), and per-step `on_error` (`continue` / `fail`). Earlier captures referenced via `${step_name.output}`. Conditional execution via `when: "step_name == ok"`.
+
+```jsonc
+workflow_run({
+  steps: [
+    { name: "build",  node: "linux-dev",  op: "shell_run", args: { command: "cargo build --release" } },
+    { name: "deploy", needs: { has_sudo: true }, op: "shell_run",
+      args: { command: "scp target/release/app remote:/usr/local/bin/" },
+      when: "build == ok" }
+  ],
+  timeout_secs: 600
+})
+```
+
+### Sandbox provisioning — `sandbox_spawn` / `sandbox_destroy` / `sandbox_list`
+
+Ephemeral VMs on demand. Backend per host OS: **Tart** on macOS (`tart clone <image> <vm-name>`), **Lima** on Linux (`limactl start --name=<inst>`), **Hyper-V** on Windows (`New-VM -VHDPath`). The hub auto-tears-down after the TTL (default 1h). The relevant binary (`tart` / `limactl` / `powershell`) must be on the hub's PATH.
+
+Agent installation into the new VM is the next step — operators currently bake the agent into the Tart image / Lima template / VHDX file.
+
+### Multi-tenant identity + approval gates
+
+Configure `kestrel-policy.toml` with users + per-op/per-node policy rules:
+
+```toml
+[[users]]
+user_id = "alice@example.com"
+bearer_token = "ak_..."
+[[users.policies]]
+op = "*"
+node = "*"
+action = { type = "allow" }
+[[users.policies]]
+op = "shell_*"
+node = "production"
+action = { type = "require_approval", approvers = ["bob@example.com"], ttl_secs = 60 }
+```
+
+Policy decision: `deny` > `require_approval` > `allow`; no matching rule = deny. Approval-gated requests block on the operator clicking approve in the dashboard `/api/approvals` queue. OIDC providers (Google, GitHub, Okta, custom) wire into the same `user_id` lookup via `crates/kestrel-hub/src/oidc.rs`.
+
+### Plugin model — `plugin_list` / `plugin_invoke`
+
+Vendor-extensible executables in `~/.kestrel/plugins/` on each agent speak JSON-RPC over stdio. ABI:
+
+```jsonc
+// Request from agent → plugin
+{ "jsonrpc": "2.0", "id": 1, "method": "info", "params": null }
+// → { "name": "myapp", "version": "1.0", "description": "...", "tools": ["select_layer"] }
+
+{ "jsonrpc": "2.0", "id": 2, "method": "call", "params": { "tool": "select_layer", "args": { "name": "Background" } } }
+// → { "result": ... }
+```
+
+AI calls `plugin_list(node_id)` to discover, `plugin_invoke(node_id, plugin, tool, args_json)` to run.
+
+### WebRTC real-time streaming — `/api/webrtc/session`
+
+Sub-second interactive screen streaming. Signalling layer + browser-side JS client are shipped (`/assets/webrtc.js`). The hub-side `RTCPeerConnection` + agent-side capture/encode pipeline is the next step; the signalling exchange (`POST /api/webrtc/session`, `/offer`, `/answer`, `/ice`) is testable against any WebRTC stack.
+
+## Out of scope (or deferred)
+
+- Mutual auth beyond the PSK
+- Hub-side WebRTC `RTCPeerConnection` + RTP send (signalling layer + JS client are ready)
+- Agent auto-install into freshly-provisioned sandboxes (bake the agent into the image for now)
+- Wayland mouse position (Wayland intentionally doesn't expose this; X11 fallback is a TODO)
+- Linux focused-app via AT-SPI returns the first application as a proxy for active; refining to true-active is a follow-up
+
 ## Setup
 
 On the hub host:
