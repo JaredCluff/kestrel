@@ -1,16 +1,20 @@
 use std::net::SocketAddr;
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub listen: SocketAddr,
     pub node_id: String,
-    pub psk: Vec<u8>,
+    /// The agent's per-node PSK. Wrapped in `Zeroizing` so the underlying
+    /// memory is wiped when the config (or any clone) drops. Defense-in-
+    /// depth against process-memory dumps and accidental swap-out.
+    pub psk: Zeroizing<Vec<u8>>,
 }
 
 impl AgentConfig {
-    pub fn new(listen: SocketAddr, node_id: String, psk: Vec<u8>) -> Self {
-        AgentConfig { listen, node_id, psk }
+    pub fn new(listen: SocketAddr, node_id: String, psk: impl Into<Zeroizing<Vec<u8>>>) -> Self {
+        AgentConfig { listen, node_id, psk: psk.into() }
     }
 
     pub fn from_str(s: &str) -> anyhow::Result<Self> {
@@ -26,7 +30,7 @@ impl AgentConfig {
 
         let raw: Raw = toml::from_str(s)?;
         let psk = match raw.agent.psk {
-            Some(hex_str) => hex::decode(&hex_str)?,
+            Some(hex_str) => Zeroizing::new(hex::decode(&hex_str)?),
             None => load_psk_from_keyring()?,
         };
         Ok(AgentConfig {
@@ -41,8 +45,10 @@ impl AgentConfig {
     }
 }
 
-/// Read the PSK from the system credential store (where `kestrel-agent enroll` puts it).
-fn load_psk_from_keyring() -> anyhow::Result<Vec<u8>> {
+/// Read the PSK from the system credential store (where `kestrel-agent
+/// enroll` puts it). Returns the bytes wrapped in `Zeroizing` so they're
+/// wiped from memory when the binding drops.
+fn load_psk_from_keyring() -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let entry = keyring::Entry::new("kestrel", "psk")
         .map_err(|e| anyhow::anyhow!("open keyring entry: {}", e))?;
     let hex_str = entry.get_password().map_err(|e| {
@@ -51,7 +57,9 @@ fn load_psk_from_keyring() -> anyhow::Result<Vec<u8>> {
             e
         )
     })?;
-    hex::decode(&hex_str).map_err(|e| anyhow::anyhow!("keyring PSK is not valid hex: {}", e))
+    Ok(Zeroizing::new(
+        hex::decode(&hex_str).map_err(|e| anyhow::anyhow!("keyring PSK is not valid hex: {}", e))?
+    ))
 }
 
 /// Write a starter agent kestrel.toml at `path`. Refuses to overwrite.
@@ -91,7 +99,11 @@ psk     = "deadbeefdeadbeefdeadbeefdeadbeef"
         let cfg = AgentConfig::from_str(s).unwrap();
         assert_eq!(cfg.node_id, "test-node");
         assert_eq!(cfg.listen.port(), 7272);
-        assert_eq!(cfg.psk, hex::decode("deadbeefdeadbeefdeadbeefdeadbeef").unwrap());
+        // Zeroizing<Vec<u8>> derefs to &[u8] for comparison.
+        assert_eq!(
+            cfg.psk.as_slice(),
+            hex::decode("deadbeefdeadbeefdeadbeefdeadbeef").unwrap().as_slice()
+        );
     }
 
     #[test]

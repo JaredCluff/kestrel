@@ -1,11 +1,13 @@
 use kestrel_proto::derive_per_node_psk;
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 /// Generate a 32-byte hub master secret. Per-node PSKs are HKDF-derived
 /// from this on every connect; the master itself never leaves the hub
-/// keyring.
-pub fn generate_master_secret() -> Vec<u8> {
-    let mut key = vec![0u8; 32];
+/// keyring. Wrapped in `Zeroizing` so the underlying bytes get wiped
+/// when the binding goes out of scope.
+pub fn generate_master_secret() -> Zeroizing<Vec<u8>> {
+    let mut key = Zeroizing::new(vec![0u8; 32]);
     rand::thread_rng().fill_bytes(&mut key);
     key
 }
@@ -30,9 +32,15 @@ pub fn store_master_secret(master_secret: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn load_master_secret() -> anyhow::Result<Vec<u8>> {
+/// Load the hub master secret from the system keyring, wrapped in
+/// `Zeroizing` so it gets wiped from memory when the returned binding
+/// drops. The intermediate hex string isn't zeroized — it's already
+/// passed through `keyring::Entry::get_password` which returns a `String`
+/// we don't control — so this is best-effort defense-in-depth, not a
+/// guarantee.
+pub fn load_master_secret() -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let entry = keyring::Entry::new("kestrel", "master_secret")?;
-    Ok(hex::decode(entry.get_password()?)?)
+    Ok(Zeroizing::new(hex::decode(entry.get_password()?)?))
 }
 
 /// 32 random bytes hex-encoded — used as a Bearer token on the hub's mutation

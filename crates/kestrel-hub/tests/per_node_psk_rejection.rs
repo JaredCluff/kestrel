@@ -26,12 +26,12 @@ use kestrel_hub::events::NodeEvent;
 use kestrel_hub::router::NodeRegistry;
 use kestrel_hub::supervisor;
 
-fn master_a() -> Vec<u8> {
-    b"kestrel-test-master-A-32bytes-pd".to_vec()
+fn master_a() -> zeroize::Zeroizing<Vec<u8>> {
+    zeroize::Zeroizing::new(b"kestrel-test-master-A-32bytes-pd".to_vec())
 }
 
-fn master_b() -> Vec<u8> {
-    b"kestrel-test-master-B-32bytes-pd".to_vec()
+fn master_b() -> zeroize::Zeroizing<Vec<u8>> {
+    zeroize::Zeroizing::new(b"kestrel-test-master-B-32bytes-pd".to_vec())
 }
 
 fn derived(master: &[u8], node_id: &str) -> Vec<u8> {

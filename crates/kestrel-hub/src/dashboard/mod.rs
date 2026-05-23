@@ -9,6 +9,7 @@ use axum::{
     routing::get,
 };
 use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
 
 use crate::router::NodeRegistry;
 
@@ -28,12 +29,16 @@ pub struct AppState {
     /// Hub-side master secret. Supervisors derive each node's per-node PSK
     /// from this + the node_id at connect time via HKDF-SHA256. The master
     /// itself never goes over the wire and never reaches agents.
-    pub master_secret: Vec<u8>,
+    ///
+    /// Wrapped in `Zeroizing` so the underlying memory is wiped when the
+    /// `AppState` (or any clone of it) drops. Defense-in-depth against
+    /// process-memory dumps and accidental swap-out.
+    pub master_secret: Zeroizing<Vec<u8>>,
     /// Symmetric key used to sign / verify dashboard session cookies.
     /// Derived from `master_secret` via HKDF with a session-specific info
     /// string; rotating the master automatically invalidates every
     /// outstanding session cookie.
-    pub session_key: [u8; 32],
+    pub session_key: Zeroizing<[u8; 32]>,
     /// Live KVM layout. The KVM event-loop task reads this on every
     /// mouse-edge crossing; the dashboard's POST/DELETE /api/layout
     /// endpoints write to it under `config_write_lock` so file and
@@ -53,7 +58,7 @@ impl AppState {
     pub fn new(
         registry: Arc<NodeRegistry>,
         config_path: String,
-        master_secret: Vec<u8>,
+        master_secret: impl Into<Zeroizing<Vec<u8>>>,
     ) -> Self {
         Self::with_layout(registry, config_path, master_secret, crate::kvm::shared_layout(Vec::new()))
     }
@@ -63,13 +68,20 @@ impl AppState {
     /// between the KVM task and the dashboard so layout edits via the
     /// dashboard take effect live. Tests that don't drive the KVM task
     /// use [`new`] which constructs an empty layout internally.
+    ///
+    /// The `master_secret` is `impl Into<Zeroizing<Vec<u8>>>` so callers
+    /// can pass either a raw `Vec<u8>` (auto-wrapped) or a pre-wrapped
+    /// `Zeroizing<Vec<u8>>` from `enrollment::load_master_secret`.
     pub fn with_layout(
         registry: Arc<NodeRegistry>,
         config_path: String,
-        master_secret: Vec<u8>,
+        master_secret: impl Into<Zeroizing<Vec<u8>>>,
         layout: crate::kvm::SharedLayout,
     ) -> Self {
-        let session_key = kestrel_proto::derive_session_signing_key(&master_secret);
+        // The Into bound covers both `Vec<u8>` (via zeroize's blanket From
+        // for any T: Zeroize) and `Zeroizing<Vec<u8>>` (identity).
+        let master_secret: Zeroizing<Vec<u8>> = master_secret.into();
+        let session_key = Zeroizing::new(kestrel_proto::derive_session_signing_key(&master_secret));
         AppState {
             registry,
             config_path,

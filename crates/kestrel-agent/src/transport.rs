@@ -75,7 +75,7 @@ async fn handle_conn(
     stream: TcpStream,
     _peer: SocketAddr,
     acceptor: TlsAcceptor,
-    psk: Vec<u8>,
+    psk: zeroize::Zeroizing<Vec<u8>>,
     node_id: String,
 ) -> anyhow::Result<()> {
     let tls = acceptor.accept(stream).await.context("TLS handshake failed")?;
