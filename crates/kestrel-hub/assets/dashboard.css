@@ -248,3 +248,30 @@ td.shot img.thumb {
 td.shot .muted {
     color: var(--muted);
 }
+
+/* Browser shell page. <pre> output area + input field. */
+pre.shell-output {
+    background: #000;
+    color: #eee;
+    border: 1px solid var(--divider);
+    padding: 12px;
+    margin-top: 24px;
+    height: 50vh;
+    overflow-y: scroll;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+#shell-form { margin-top: 12px; }
+#shell-form input {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--divider);
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+#shell-form input:focus { outline: none; border-color: var(--accent); }

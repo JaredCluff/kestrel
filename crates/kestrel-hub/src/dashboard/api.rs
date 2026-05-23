@@ -148,7 +148,6 @@ pub async fn screenshot_handler(
     headers: axum::http::HeaderMap,
     axum::extract::Path(node_id): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    use axum::response::IntoResponse;
     check_auth(&state, &headers)?;
 
     // Fast path: serve from cache when fresh.
@@ -723,6 +722,138 @@ pub async fn ui_set_layout(
                 .into_response()
         }
     }
+}
+
+// -------- Browser shell pane ------------------------------------------------
+//
+// Two endpoints:
+//   GET /shell/:node_id          → renders the HTML shell page (xterm-free,
+//                                   minimal-viable terminal: <pre> output +
+//                                   <input> for commands).
+//   GET /api/shell/ws/:node_id   → WebSocket upgrade; bridges browser
+//                                   keystrokes to the agent's PTY and PTY
+//                                   output back. Same-origin cookies carry
+//                                   auth so we don't need to thread the
+//                                   bearer token through the upgrade.
+//
+// Frame protocol: text. Browser sends keystrokes (or full lines) as
+// text frames; server sends PTY output as text frames. Bytes are passed
+// through unchanged — ANSI control sequences from the shell will appear
+// as literal characters in the <pre>. This is intentionally primitive
+// (no xterm.js dependency); users who want full ncurses-app support
+// should stick with the MCP `shell_open`/`shell_write`/`shell_read`
+// tools.
+
+pub async fn shell_page(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(node_id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_authenticated(&state, &headers) {
+        return axum::response::Redirect::to("/login").into_response();
+    }
+    crate::dashboard::templates::shell_page(&node_id).into_response()
+}
+
+pub async fn shell_ws(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(node_id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !is_authenticated(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "not authenticated").into_response();
+    }
+    ws.on_upgrade(move |socket| handle_shell_socket(socket, state, node_id))
+}
+
+async fn handle_shell_socket(
+    socket: axum::extract::ws::WebSocket,
+    state: AppState,
+    node_id: String,
+) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+
+    // Open a PTY on the agent. If the agent rejects, send an error
+    // frame to the browser and close.
+    let pty_id = match state.registry.shell_open(&node_id, None, 80, 24).await {
+        Ok(id) => id,
+        Err(e) => {
+            let (mut tx, _rx) = socket.split();
+            let _ = tx
+                .send(Message::Text(format!(
+                    "[hub] shell_open on '{}' failed: {}\n",
+                    node_id, e
+                )))
+                .await;
+            let _ = tx.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let (mut sender, mut receiver) = socket.split();
+    let registry = state.registry.clone();
+    let registry_for_writer = registry.clone();
+    let node_id_writer = node_id.clone();
+
+    // Output pump: poll the PTY buffer every 200ms and forward any
+    // bytes to the browser. 200ms is a compromise between perceived
+    // responsiveness and not hammering the registry.
+    let node_for_pump = node_id.clone();
+    let pump_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            match registry.shell_read(&node_for_pump, pty_id).await {
+                Ok(buf) if !buf.is_empty() => {
+                    let text = String::from_utf8_lossy(&buf).into_owned();
+                    if sender.send(Message::Text(text)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => {
+                    // PTY gone (agent dropped, shell exited).
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+        }
+    });
+
+    // Input pump: forward every browser text frame to the PTY.
+    while let Some(msg) = receiver.next().await {
+        let Ok(msg) = msg else { break };
+        match msg {
+            Message::Text(t) => {
+                if registry_for_writer
+                    .shell_write(&node_id_writer, pty_id, t.into_bytes())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Message::Binary(b) => {
+                if registry_for_writer
+                    .shell_write(&node_id_writer, pty_id, b)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Message::Close(_) => break,
+            _ => {} // Ping/Pong are handled by axum
+        }
+    }
+
+    // Browser hung up. Cancel the output pump and close the PTY on
+    // the agent so it doesn't linger.
+    pump_task.abort();
+    let _ = registry_for_writer.shell_close(&node_id_writer, pty_id).await;
 }
 
 pub async fn ui_unset_layout(

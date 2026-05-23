@@ -144,6 +144,55 @@ fn page_inner(
 /// Intentionally minimal: same Linear-style monochrome aesthetic as the
 /// main dashboard, no extra CSS, no client-side validation, no autofocus
 /// gymnastics. The form posts to itself.
+/// Minimal browser shell page. Opens a WebSocket to /api/shell/ws/<id>,
+/// streams output into a <pre>, sends keystrokes from a text <input>.
+/// No xterm.js dependency — ANSI control sequences from the shell will
+/// render as literal characters. Intentional: the MCP shell tools
+/// remain the primary interface for ncurses-app use cases; this is for
+/// quick interactive checks from a browser tab.
+pub fn shell_page(node_id: &str) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "Kestrel shell — " (node_id) }
+                link rel="stylesheet" href="/assets/dashboard.css";
+                script src="/assets/shell.js" {}
+            }
+            body {
+                main {
+                    header {
+                        a href="/" { "← back" }
+                        span { "Shell" }
+                        span.count { (node_id) }
+                    }
+                    pre.shell-output id="shell-output" { }
+                    form id="shell-form" {
+                        input
+                            id="shell-input"
+                            type="text"
+                            placeholder="command"
+                            autocomplete="off"
+                            autofocus;
+                    }
+                    p.muted style="margin-top: 8px; font-size: 12px;" {
+                        "Type a command and press Enter. ANSI escape codes render literally — \
+                         use the MCP shell_open / shell_write / shell_read tools for ncurses apps."
+                    }
+                }
+                script {
+                    (maud::PreEscaped(format!(
+                        "window.__kestrelNodeId = {};",
+                        serde_json::to_string(node_id).unwrap_or_else(|_| "\"\"".into())
+                    )))
+                }
+            }
+        }
+    }
+}
+
 pub fn login_page(error: Option<&str>) -> Markup {
     html! {
         (DOCTYPE)
@@ -245,6 +294,13 @@ pub fn nodes_rows_with_controls(nodes: &[NodeStatus], authed: bool) -> Markup {
                             }
                         }
                         td.actions {
+                            // Shell-pane link — only meaningful for Online
+                            // nodes (the WS handler would 404 immediately
+                            // for anything else).
+                            @if matches!(n.state, NodeState::Online) {
+                                a.linkish href=(format!("/shell/{}", n.node_id)) { "Shell" }
+                                " "
+                            }
                             // Inline form so the entire interaction is one
                             // round trip. The browser confirm() guards
                             // against an accidental click. The POST target
