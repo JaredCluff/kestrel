@@ -34,6 +34,18 @@ accessibility     = { workspace = true }
 accessibility-sys = { workspace = true }
 objc              = { workspace = true }
 
+# Linux: AT-SPI via D-Bus. atspi is async + zbus-based; we run it under a
+# small tokio current-thread runtime inside describe() so the public
+# entry point stays synchronous, matching the macOS and Windows paths.
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi = "0.22"
+
+# Windows: UI Automation via the uiautomation crate (a thin wrapper over
+# the COM API). Pulls in windows-rs + COM bindings, gated to Windows
+# builds only.
+[target.'cfg(target_os = "windows")'.dependencies]
+uiautomation = "0.16"
+
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
