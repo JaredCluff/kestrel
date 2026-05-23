@@ -157,13 +157,20 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Check the `Authorization: Bearer <token>` header against the configured
-/// control token. If the state has no `control_token`, auth is disabled.
+/// Check authentication on a mutation request. Accepts EITHER of:
+///   - `Authorization: Bearer <control_token>` (the CLI flow). Constant-
+///     time compared against the configured token.
+///   - `Cookie: kestrel_session=<signed>` (the dashboard browser flow).
+///     Verified against `state.session_key` with constant-time HMAC.
 ///
-/// Comparison is constant-time — a LAN attacker can otherwise probe the
-/// token byte-by-byte by measuring response latency. The token is high
-/// entropy (~64 hex chars), but defense-in-depth matters here since the
-/// dashboard is documented as opt-in LAN-exposable.
+/// If the state has no `control_token`, auth is disabled and the request
+/// is accepted regardless. This preserves the legacy/no-auth setup path
+/// for installs that haven't yet run `kestrel-hub init`.
+///
+/// The bearer path is checked first because it's the only path CLI
+/// callers can take, and we want the bearer error to be the visible one
+/// when both header families are absent (the cookie path's "missing"
+/// state is just "no session yet, go to /login").
 fn check_auth(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -171,15 +178,48 @@ fn check_auth(
     let Some(expected) = state.control_token.as_deref() else {
         return Ok(()); // auth disabled
     };
-    let provided = headers
+
+    // Path 1: Authorization: Bearer <token>. Constant-time compared.
+    let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-    match provided {
-        Some(t) if ct_eq(t.as_bytes(), expected.as_bytes()) => Ok(()),
-        Some(_) => Err((StatusCode::UNAUTHORIZED, "invalid control token".into())),
-        None => Err((StatusCode::UNAUTHORIZED, "missing Authorization: Bearer header".into())),
+    if let Some(t) = bearer {
+        return if ct_eq(t.as_bytes(), expected.as_bytes()) {
+            Ok(())
+        } else {
+            Err((StatusCode::UNAUTHORIZED, "invalid control token".into()))
+        };
     }
+
+    // Path 2: signed session cookie.
+    if let Some(cookie_header) = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(value) = super::session::extract_cookie(cookie_header) {
+            return match super::session::verify(
+                &state.session_key,
+                value,
+                super::session::now_unix_secs(),
+            ) {
+                Ok(_) => Ok(()),
+                Err(super::session::VerifyError::Expired) => Err((
+                    StatusCode::UNAUTHORIZED,
+                    "session expired; sign in again at /login".into(),
+                )),
+                Err(_) => Err((
+                    StatusCode::UNAUTHORIZED,
+                    "invalid session cookie".into(),
+                )),
+            };
+        }
+    }
+
+    Err((
+        StatusCode::UNAUTHORIZED,
+        "missing Authorization: Bearer header or kestrel_session cookie".into(),
+    ))
 }
 
 /// POST /api/nodes — body: { node_id, address }
@@ -290,6 +330,84 @@ pub async fn delete_node(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -------- /login + /logout --------------------------------------------------
+//
+// Two-stage flow:
+//   1. Browser GETs /login → renders an HTML form prompting for the control
+//      token. The token is the same one the CLI uses; operators paste it
+//      once and the resulting cookie covers subsequent visits.
+//   2. Browser POSTs the form. On a valid token the server issues a signed
+//      session cookie via `Set-Cookie` and redirects to `/`. On invalid,
+//      it re-renders the form with an error.
+//
+// Logout is a POST (never a GET — GET is reserved for non-state-changing
+// requests, and cross-site GETs are how CSRF would bypass our SameSite
+// guard if logout were idempotent over GET).
+
+#[derive(serde::Deserialize)]
+pub struct LoginForm {
+    pub token: String,
+}
+
+pub async fn login_form(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // If auth is disabled, the dashboard's write actions are already open;
+    // sending the user to a login form would be confusing. Redirect home.
+    if state.control_token.is_none() {
+        return axum::response::Redirect::to("/").into_response();
+    }
+    crate::dashboard::templates::login_page(None).into_response()
+}
+
+pub async fn login_submit(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Form(form): axum::Form<LoginForm>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let Some(expected) = state.control_token.as_deref() else {
+        // Auth disabled — accept the form and send home. Don't bother
+        // setting a cookie; nothing checks it.
+        return axum::response::Redirect::to("/").into_response();
+    };
+
+    if !ct_eq(form.token.as_bytes(), expected.as_bytes()) {
+        // Re-render the form with an error. 401 keeps automation honest;
+        // a successful redirect would be misleading.
+        return (
+            StatusCode::UNAUTHORIZED,
+            crate::dashboard::templates::login_page(Some("Invalid token.")),
+        )
+            .into_response();
+    }
+
+    // Token matched. Issue a signed cookie for the configured TTL.
+    let (cookie, _expiry) = super::session::set_cookie_header(
+        &state.session_key,
+        super::session::DEFAULT_SESSION_TTL_SECS,
+    );
+    let mut response = axum::response::Redirect::to("/").into_response();
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&cookie) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, hv);
+    }
+    response
+}
+
+pub async fn logout() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let cookie = super::session::clear_cookie_header();
+    let mut response = axum::response::Redirect::to("/login").into_response();
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&cookie) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, hv);
+    }
+    response
 }
 
 #[cfg(test)]

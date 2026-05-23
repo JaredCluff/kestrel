@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use crate::router::NodeRegistry;
 
 pub mod api;
+pub mod session;
 pub mod sse;
 pub mod templates;
 
@@ -28,11 +29,17 @@ pub struct AppState {
     /// from this + the node_id at connect time via HKDF-SHA256. The master
     /// itself never goes over the wire and never reaches agents.
     pub master_secret: Vec<u8>,
+    /// Symmetric key used to sign / verify dashboard session cookies.
+    /// Derived from `master_secret` via HKDF with a session-specific info
+    /// string; rotating the master automatically invalidates every
+    /// outstanding session cookie.
+    pub session_key: [u8; 32],
     pub supervisors: SupervisorMap,
     /// Serializes config file read-modify-write cycles across concurrent HTTP requests.
     pub config_write_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Bearer token required on mutation endpoints (POST/DELETE /api/nodes).
-    /// `None` means auth is disabled — the read-only endpoints stay open either way.
+    /// Bearer token required on mutation endpoints (POST/DELETE /api/nodes,
+    /// and the form action target of /login). `None` means auth is
+    /// disabled — the read-only endpoints stay open either way.
     pub control_token: Option<String>,
 }
 
@@ -42,10 +49,12 @@ impl AppState {
         config_path: String,
         master_secret: Vec<u8>,
     ) -> Self {
+        let session_key = kestrel_proto::derive_session_signing_key(&master_secret);
         AppState {
             registry,
             config_path,
             master_secret,
+            session_key,
             supervisors: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             control_token: None,
@@ -73,6 +82,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/sse", get(sse_handler))
+        .route("/login", get(api::login_form).post(api::login_submit))
+        .route("/logout", axum::routing::post(api::logout))
         .route("/api/nodes", get(api::nodes_json).post(api::post_node))
         .route("/api/nodes/:node_id", axum::routing::delete(api::delete_node))
         .route("/api/events", get(api::events_handler))

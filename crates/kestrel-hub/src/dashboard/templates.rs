@@ -32,6 +32,49 @@ pub fn page(nodes: &[NodeStatus]) -> Markup {
     }
 }
 
+/// Login page. Rendered on `GET /login` and on `POST /login` when the
+/// supplied token doesn't match (in which case `error` is set and the
+/// page also returns a 401 status so automation sees the failure).
+///
+/// Intentionally minimal: same Linear-style monochrome aesthetic as the
+/// main dashboard, no extra CSS, no client-side validation, no autofocus
+/// gymnastics. The form posts to itself.
+pub fn login_page(error: Option<&str>) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "Kestrel — sign in" }
+                link rel="stylesheet" href="/assets/dashboard.css";
+            }
+            body {
+                main {
+                    header { span { "Sign in" } }
+                    form method="post" action="/login" {
+                        // type=password so it doesn't shoulder-surf or leak
+                        // into clipboard managers. autocomplete=current-
+                        // password lets browser password managers remember
+                        // it for the operator.
+                        input
+                            type="password"
+                            name="token"
+                            placeholder="control token"
+                            required
+                            autocomplete="current-password"
+                            autofocus;
+                        button type="submit" { "Continue" }
+                    }
+                    @if let Some(msg) = error {
+                        p.error { (msg) }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn nodes_rows(nodes: &[NodeStatus]) -> Markup {
     html! {
         @if nodes.is_empty() {
