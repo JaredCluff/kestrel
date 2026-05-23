@@ -231,3 +231,20 @@ form.addlayout input:focus {
     outline: none;
     border-color: var(--accent);
 }
+
+/* Per-row screenshot thumbnail. Small, low-contrast border so it
+   sits quietly in the row rather than dominating. */
+td.shot {
+    width: 160px;
+    padding-right: 12px;
+}
+td.shot img.thumb {
+    max-width: 160px;
+    max-height: 90px;
+    border: 1px solid var(--divider);
+    display: block;
+    background: #000;
+}
+td.shot .muted {
+    color: var(--muted);
+}

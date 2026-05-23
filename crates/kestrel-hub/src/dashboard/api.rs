@@ -128,6 +128,79 @@ pub async fn events_handler(
     events_stream(registry)
 }
 
+/// TTL for cached screenshots. After this, a fetch triggers a fresh
+/// capture from the agent. Operators viewing the dashboard see at most
+/// `SCREENSHOT_TTL` of staleness per node — generous enough to keep
+/// the per-node MCP load low when the dashboard is open.
+pub const SCREENSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `GET /api/screenshot/:node_id` — returns the most recent PNG for
+/// `node_id`. Refreshes from the agent if the cache is stale or
+/// missing. Returns 404 if the node isn't connected or the agent
+/// rejects the screenshot call.
+///
+/// Auth: gated through `check_auth` — screenshots can contain
+/// passwords, sensitive emails, etc. Read-only / un-authenticated
+/// viewers get 401; the browser shows a broken-image icon, which is
+/// the right UX signal.
+pub async fn screenshot_handler(
+    axum::extract::State(state): axum::extract::State<crate::dashboard::AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    check_auth(&state, &headers)?;
+
+    // Fast path: serve from cache when fresh.
+    {
+        let cache = state.screenshots.read().await;
+        if let Some(entry) = cache.get(&node_id) {
+            if entry.captured_at.elapsed() < SCREENSHOT_TTL {
+                return Ok(png_response(entry.png.clone()));
+            }
+        }
+    }
+
+    // Cache miss / stale: request fresh from the agent.
+    let png = state
+        .registry
+        .screenshot(&node_id, 0, None)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("screenshot on '{}': {}", node_id, e)))?;
+    let png = std::sync::Arc::new(png);
+
+    // Write-back under the briefest possible exclusive lock. Other
+    // readers waiting on read() will get the fresh entry.
+    {
+        let mut cache = state.screenshots.write().await;
+        cache.insert(
+            node_id.clone(),
+            crate::dashboard::CachedScreenshot {
+                png: png.clone(),
+                captured_at: std::time::Instant::now(),
+            },
+        );
+    }
+    Ok(png_response(png))
+}
+
+fn png_response(png: std::sync::Arc<Vec<u8>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Cache-Control mirrors our TTL so reasonable browsers don't
+    // re-fetch faster than the server is willing to recompute.
+    let headers = [
+        (axum::http::header::CONTENT_TYPE, "image/png"),
+        (
+            axum::http::header::CACHE_CONTROL,
+            "private, max-age=30",
+        ),
+    ];
+    // Arc<Vec<u8>> → Vec<u8> via clone for axum's Body. Cost is one
+    // O(N) copy per response which is fine for screenshot-sized
+    // payloads.
+    (headers, (*png).clone()).into_response()
+}
+
 use axum::extract::Path;
 use axum::http::StatusCode;
 

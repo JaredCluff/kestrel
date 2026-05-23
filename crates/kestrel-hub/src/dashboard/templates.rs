@@ -185,11 +185,27 @@ pub fn login_page(error: Option<&str>) -> Markup {
 /// the SSE connection was opened from an authenticated browser. The
 /// no-controls version (`nodes_rows`) is kept for tests and any
 /// hypothetical future SSE consumer that wants pure read-only output.
+///
+/// Authenticated rows for Online nodes also include a per-row
+/// `<img>` thumbnail pointing at `/api/screenshot/:id?ts=<unix>`.
+/// The query-string timestamp cache-busts the browser so SSE-driven
+/// re-renders pick up fresh screenshots; the server enforces a TTL
+/// (see api::SCREENSHOT_TTL) so the cache-bust doesn't translate
+/// into per-render screenshot calls.
 pub fn nodes_rows_with_controls(nodes: &[NodeStatus], authed: bool) -> Markup {
+    // ts is computed once per render so all rows share it (which means
+    // browsers can cache identical images within one render snapshot).
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let actions_cols = if authed { 1 } else { 0 };
+    let shot_cols = if authed { 1 } else { 0 };
+    let total_cols = 3 + actions_cols + shot_cols;
     html! {
         @if nodes.is_empty() {
             tr {
-                td.empty colspan=(if authed { "4" } else { "3" }) { "no nodes" }
+                td.empty colspan=(total_cols.to_string()) { "no nodes" }
             }
         } @else {
             @for n in nodes {
@@ -213,6 +229,21 @@ pub fn nodes_rows_with_controls(nodes: &[NodeStatus], authed: bool) -> Markup {
                         }
                     }
                     @if authed {
+                        td.shot {
+                            // Screenshots only for Online nodes. The
+                            // endpoint requires auth (so unauthed viewers
+                            // would get a broken-image icon anyway); we
+                            // omit the tag entirely for unauthed renders.
+                            // For non-Online nodes a placeholder is shown.
+                            @if matches!(n.state, NodeState::Online) {
+                                img.thumb
+                                    src=(format!("/api/screenshot/{}?ts={}", n.node_id, ts))
+                                    alt=(format!("screenshot of {}", n.node_id))
+                                    loading="lazy";
+                            } @else {
+                                span.muted { "—" }
+                            }
+                        }
                         td.actions {
                             // Inline form so the entire interaction is one
                             // round trip. The browser confirm() guards
