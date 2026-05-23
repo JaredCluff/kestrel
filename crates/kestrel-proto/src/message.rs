@@ -49,6 +49,12 @@ pub enum Payload {
     /// — callers get a stable code they can switch on plus a human
     /// message they can surface to operators.
     Error { code: ErrorCode, message: String },
+    /// Phase 6 — World state event push. Variant 25.
+    /// Emitted by the agent's `WorldObserver` every ~2s when its
+    /// observation diverges from the last sent state. Hub consumes
+    /// these to maintain a per-node `WorldState` cache exposed via
+    /// the `world_state` and `world_diff_since` MCP tools.
+    WorldUpdate { state: crate::world::WorldState },
 }
 
 /// Stable error codes used in [`Payload::Error`]. Wire-stable: never
@@ -79,7 +85,7 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OsInfo { pub name: String, pub version: String }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayInfo { pub id: u8, pub width: u32, pub height: u32 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -423,6 +429,56 @@ mod tests {
         for msg in [write, resize, close] {
             assert_eq!(roundtrip(&msg), msg);
         }
+    }
+
+    #[test]
+    fn roundtrip_world_update_full_and_empty() {
+        use crate::world::*;
+        // Empty world state — bootstrap shape, all-None / empty vecs.
+        let empty = KestrelMessage {
+            stream_id: 0,
+            kind: MsgKind::Event,
+            payload: Payload::WorldUpdate { state: WorldState::empty() },
+        };
+        assert_eq!(roundtrip(&empty), empty);
+
+        // Fully populated world state — exercises every field
+        // including the optional / vec slots. If a field gets added
+        // to WorldState in the future without a corresponding line
+        // here, this test still passes (additive change) — that's
+        // fine; the per-field PartialEq tests in world.rs catch
+        // serialization gaps.
+        let full = KestrelMessage {
+            stream_id: 0,
+            kind: MsgKind::Event,
+            payload: Payload::WorldUpdate {
+                state: WorldState {
+                    focused_app: Some(FocusedApp {
+                        name: "Safari".into(),
+                        pid: 1234,
+                        window_title: Some("Inbox — claude.ai".into()),
+                    }),
+                    mouse: Some(MousePosition { x: 800, y: 600, display: 1 }),
+                    displays: vec![
+                        DisplayInfo { id: 0, width: 1920, height: 1080 },
+                        DisplayInfo { id: 1, width: 2560, height: 1440 },
+                    ],
+                    clipboard: Some(ClipboardMetadata {
+                        kind: ClipboardKind::Text,
+                        byte_len: 12,
+                        fingerprint_hex: "0123456789abcdef".into(),
+                    }),
+                    shells: vec![ShellSession {
+                        pty_id: 7,
+                        alive: true,
+                        buffered_bytes: 4096,
+                        last_write_unix: 1748000000,
+                    }],
+                    last_observed_unix: 1748010000,
+                },
+            },
+        };
+        assert_eq!(roundtrip(&full), full);
     }
 
     #[test]
