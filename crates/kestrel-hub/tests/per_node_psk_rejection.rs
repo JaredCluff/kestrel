@@ -179,7 +179,12 @@ async fn matched_per_node_psk_authenticates() {
         master_a(),
     );
 
-    let saw_connected = observed_connected(&mut rx, "happy", Duration::from_secs(5)).await;
+    // 10s gives the handshake (TCP connect → TLS → PSK challenge →
+    // AuthResponse → supervisor publishes Connected) plenty of headroom
+    // even when many test binaries run in parallel under cargo test.
+    // Was 5s; bumped to remove a flake observed under workspace-wide test
+    // runs that share the host's TCP backlog.
+    let saw_connected = observed_connected(&mut rx, "happy", Duration::from_secs(10)).await;
     assert!(
         saw_connected,
         "matched per-node PSK (same master, same node_id) MUST authenticate"

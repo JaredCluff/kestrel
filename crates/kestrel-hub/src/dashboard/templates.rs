@@ -82,17 +82,16 @@ pub fn node_detail(node_id: &str, authed: bool) -> Markup {
                             "Sign in to view this node's live stream."
                         }
                     } @else {
-                        video.kestrel-stream id="kv" autoplay muted playsinline {}
-                        script {
-                            (maud::PreEscaped(format!(
-                                "KestrelWebRTC.start({:?}, document.getElementById('kv')).catch(e => {{ \
-                                  console.error('webrtc start failed:', e); \
-                                  document.querySelector('main').insertAdjacentHTML('beforeend', \
-                                    '<p class=\"error\">stream failed: ' + e.message + '</p>'); \
-                                }});",
-                                node_id
-                            )))
-                        }
+                        // node_id is HTML-attribute-escaped by maud, then
+                        // read by the JS bootstrap via dataset.nodeId. We
+                        // intentionally do NOT inline it into the script
+                        // body — </script> in the path would otherwise
+                        // break out of the script context.
+                        video.kestrel-stream
+                            id="kv"
+                            data-node-id=(node_id)
+                            autoplay muted playsinline {}
+                        script src="/assets/node-detail.js" {}
                     }
                 }
             }

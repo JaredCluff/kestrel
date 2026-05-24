@@ -201,8 +201,12 @@ pub async fn bootstrap(
     scp_to_vm(&config.agent_binary, remote_bin, &config.ssh_user, &ip, &config.ssh_key).await?;
 
     // Make sure the binary is executable; scp preserves mode on most
-    // platforms but not all, so be explicit.
-    let _ = ssh_run(
+    // platforms but not all, so be explicit. A non-zero exit here
+    // usually means /usr/local/bin isn't writable by the configured
+    // ssh_user — surface that as a real error rather than silently
+    // continuing into a `start` that will fail with a confusing
+    // permission-denied much later.
+    let chmod = ssh_run(
         &config.ssh_user,
         &ip,
         &config.ssh_key,
@@ -210,6 +214,17 @@ pub async fn bootstrap(
         &[],
     )
     .await?;
+    if !chmod.status.success() {
+        anyhow::bail!(
+            "chmod +x {} on {} failed (exit {:?}): {} \
+             (check that the SSH user owns or can write {})",
+            remote_bin,
+            ip,
+            chmod.status.code(),
+            String::from_utf8_lossy(&chmod.stderr),
+            remote_bin,
+        );
+    }
 
     // Write a minimal agent kestrel.toml. The PSK is intentionally
     // OMITTED from this file — the agent reads it from KESTREL_PSK_HEX

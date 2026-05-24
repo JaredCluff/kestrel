@@ -217,7 +217,7 @@ async fn phase13b_sdp_round_trip_through_hub_to_agent() {
     let addr = start_agent("webrtc-node").await;
     let registry = Arc::new(NodeRegistry::new());
     let sessions = SessionRegistry::new();
-    registry.attach_webrtc_sessions(sessions.clone()).await;
+    registry.attach_webrtc_sessions(sessions.clone());
 
     // Use the supervisor path so the webrtc_pump is wired in.
     let (handle, _actor, _world_rx, _caps_rx, mut webrtc_rx) =
@@ -306,7 +306,7 @@ async fn phase13c_agent_ice_candidates_reach_session_registry() {
     let addr = start_agent("ice-node").await;
     let registry = Arc::new(NodeRegistry::new());
     let sessions = SessionRegistry::new();
-    registry.attach_webrtc_sessions(sessions.clone()).await;
+    registry.attach_webrtc_sessions(sessions.clone());
 
     let (handle, _actor, _world_rx, _caps_rx, mut webrtc_rx) =
         connect_with_world_sink(addr, &test_psk()).await.unwrap();
@@ -387,7 +387,7 @@ async fn phase13c_browser_to_agent_ice_forwarding_does_not_error() {
     let addr = start_agent("ice2-node").await;
     let registry = Arc::new(NodeRegistry::new());
     let sessions = SessionRegistry::new();
-    registry.attach_webrtc_sessions(sessions.clone()).await;
+    registry.attach_webrtc_sessions(sessions.clone());
 
     let (handle, _actor, _world_rx, _caps_rx, _webrtc_rx) =
         connect_with_world_sink(addr, &test_psk()).await.unwrap();

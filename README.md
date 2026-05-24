@@ -85,7 +85,7 @@ node = "production"
 action = { type = "require_approval", approvers = ["bob@example.com"], ttl_secs = 60 }
 ```
 
-Policy decision: `deny` > `require_approval` > `allow`; no matching rule = deny. Approval-gated requests block on the operator clicking approve in the dashboard `/api/approvals` queue. OIDC providers (Google, GitHub, Okta, custom) wire into the same `user_id` lookup via `crates/kestrel-hub/src/oidc.rs`.
+Policy decision: `deny` > `require_approval` > `allow`; no matching rule = deny. Approval-gated requests block on the operator clicking approve in the dashboard `/api/approvals` queue. OIDC providers (Google, Okta, Auth0, Keycloak, custom) wire into the same `user_id` lookup via `crates/kestrel-hub/src/oidc.rs`. GitHub is intentionally absent — it doesn't expose OIDC for human users (only for Actions workflow tokens), so it can't be plugged in here.
 
 ### Plugin model — `plugin_list` / `plugin_invoke`
 

@@ -11,6 +11,29 @@ pub struct KestrelMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MsgKind { Request, Response, Event, Ack }
 
+/// The agent ↔ hub wire payload.
+///
+/// **WIRE STABILITY — READ BEFORE EDITING.**
+///
+/// bincode-with-serde encodes this enum by its variant *index* (its
+/// position in source order), not by name. That means:
+/// - **Never reorder variants.** Even a "cosmetic" reshuffle silently
+///   misroutes every payload to the wrong handler on agents and hubs
+///   running the older order.
+/// - **Never delete variants** in the middle of the enum. Removing
+///   `Ping` would slide `Pong` down by one, doing the same damage.
+///   If you must retire a variant, replace it with a tombstone
+///   (`#[deprecated] _Retired1 = ...`) or leave it in place and stop
+///   sending it.
+/// - **Only append new variants at the END.** That's how every "Phase X"
+///   addition below has been kept wire-compatible across rolling
+///   upgrades.
+/// - **Don't change a variant's fields' types or order.** bincode also
+///   encodes inner struct fields by position. Adding a new field at
+///   the end of a variant's payload struct breaks decoders too.
+///
+/// The `(variants N-M)` comments below pin each phase's index range so
+/// reviewers can verify additions slot in at the right place.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Payload {
     // Phase 1 — Auth + System (variants 0-4, discriminants unchanged)

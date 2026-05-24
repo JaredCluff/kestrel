@@ -132,7 +132,7 @@ impl WorldObserver {
                     break;
                 }
                 cap_tick = cap_tick.wrapping_add(1);
-                if cap_tick % CAP_REEMIT_EVERY == 0 {
+                if cap_tick.is_multiple_of(CAP_REEMIT_EVERY) {
                     self.push_capabilities_now().await;
                 }
             }
@@ -403,7 +403,7 @@ mod tests {
             last_observed_unix: 200, // newer
         };
         // Replicate observe_and_maybe_send's diff logic.
-        let mut last = obs.last_sent.lock().await;
+        let last = obs.last_sent.lock().await;
         let mut probe = observed.clone();
         probe.last_observed_unix = last.last_observed_unix;
         let would_send = probe != *last;

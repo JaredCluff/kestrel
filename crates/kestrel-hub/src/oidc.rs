@@ -8,9 +8,12 @@
 //
 // AUTHOR CAVEAT: written without runtime testing against a real
 // provider. The flow follows the openidconnect 3.x API and standard
-// PKCE auth-code best practices. Hardcoded provider profiles for
-// Google + GitHub make those one-line operator configs; arbitrary
-// providers can be configured via raw issuer URLs.
+// PKCE auth-code best practices. A hardcoded shortcut for Google
+// makes that one-line in operator config; any other IdP (Okta,
+// Auth0, Keycloak, custom) goes in by raw issuer URL.
+//
+// GitHub is intentionally NOT shortcutted — see the `issuer` field
+// doc for why.
 
 use anyhow::Context;
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType};
@@ -23,11 +26,18 @@ use openidconnect::{
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct OidcProvider {
     /// Operator-chosen label, used in URL paths and policy rules
-    /// (e.g. "google", "github", "okta-corp").
+    /// (e.g. "google", "okta-corp").
     pub name: String,
-    /// Full issuer URL. Hardcoded shortcuts: "google" expands to
-    /// https://accounts.google.com, "github" expands to
-    /// https://token.actions.githubusercontent.com.
+    /// Full issuer URL. One hardcoded shortcut: "google" expands to
+    /// https://accounts.google.com. Anything else is used verbatim
+    /// (Okta, Auth0, Keycloak, custom IdPs).
+    ///
+    /// GitHub deliberately has NO shortcut: GitHub does not expose
+    /// OIDC for individual users (their interactive login uses the
+    /// OAuth 2.0 user-info flow at /api/user, not OIDC discovery).
+    /// The `token.actions.githubusercontent.com` issuer is the GitHub
+    /// Actions workflow-token issuer and would mislead operators
+    /// trying to set up human sign-in.
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
@@ -136,7 +146,6 @@ pub async fn complete_login(
 fn expand_issuer(s: &str) -> String {
     match s {
         "google" => "https://accounts.google.com".into(),
-        "github" => "https://token.actions.githubusercontent.com".into(),
         other => other.into(),
     }
 }
@@ -154,7 +163,10 @@ mod tests {
     #[test]
     fn expand_issuer_shortcuts() {
         assert_eq!(expand_issuer("google"), "https://accounts.google.com");
-        assert_eq!(expand_issuer("github"), "https://token.actions.githubusercontent.com");
+        // Verbatim passthrough for everything else (Okta, Auth0, custom).
         assert_eq!(expand_issuer("https://my.idp.example/"), "https://my.idp.example/");
+        // Explicit pin: no "github" shortcut. GitHub doesn't expose OIDC
+        // for human users; the Actions OIDC issuer would mislead operators.
+        assert_eq!(expand_issuer("github"), "github");
     }
 }

@@ -299,7 +299,10 @@ async fn supervisor_uses_agent_node_id_when_configured_matches() {
         test_master_secret(),
     );
 
-    wait_for_connected(&mut rx, "matching-id", Duration::from_secs(5))
+    // 10s headroom for first connect under workspace-wide parallel test
+    // load — the bottleneck is TLS+PSK handshake, which can take several
+    // seconds when many test binaries share the host's TCP backlog.
+    wait_for_connected(&mut rx, "matching-id", Duration::from_secs(10))
         .await
         .expect("Connected with matching id should arrive");
 
@@ -377,8 +380,8 @@ async fn supervisor_reconnects_after_agent_restart() {
         test_master_secret(),
     );
 
-    // 3. Expect first Connected within 5s.
-    wait_for_connected(&mut rx, "recon-node", Duration::from_secs(5))
+    // 3. Expect first Connected within 10s (workspace-parallel headroom).
+    wait_for_connected(&mut rx, "recon-node", Duration::from_secs(10))
         .await
         .expect("first Connected did not arrive in time");
 

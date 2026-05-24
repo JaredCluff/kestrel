@@ -73,11 +73,14 @@ pub fn spawn(display_index: usize, target_fps: u32) -> mpsc::Receiver<EncodedFra
 
     // Hand the xcap capture into the testable `spawn_with_source` path.
     // The closure handles the RGBA→BGRA swap + HiDPI-crop here so the
-    // inner loop only sees ready-to-encode frames.
+    // inner loop only sees ready-to-encode frames. xcap never signals
+    // "stop" — the capture thread winds down only when its consumer
+    // drops the EncodedFrame receiver.
     spawn_with_source(enc_w as u32, enc_h as u32, target_fps, move || {
-        let img = mon
-            .capture_image()
-            .map_err(|e| anyhow::anyhow!("xcap capture: {}", e))?;
+        let img = match mon.capture_image() {
+            Ok(i) => i,
+            Err(e) => return CaptureOutcome::Skip(anyhow::anyhow!("xcap capture: {}", e)),
+        };
         let (img_w, img_h) = (img.width() as usize, img.height() as usize);
         let mut bgra = img.into_raw();
         for px in bgra.chunks_exact_mut(4) {
@@ -88,20 +91,25 @@ pub fn spawn(display_index: usize, target_fps: u32) -> mpsc::Receiver<EncodedFra
         } else {
             bgra
         };
-        Ok(out)
+        CaptureOutcome::Frame(out)
     })
+}
+
+/// Outcome of one `capture` closure invocation.
+///
+/// Production code only ever returns `Frame(bytes)` or `Skip(err)` —
+/// the encode loop sleeps one interval after a `Skip` and retries.
+/// Tests use `Stop` to terminate a finite-frame scenario cleanly
+/// without playing string-comparison games against error messages.
+pub enum CaptureOutcome {
+    Frame(Vec<u8>),
+    Skip(anyhow::Error),
+    Stop,
 }
 
 /// Test-friendly entry point: drive the encode loop with an arbitrary
 /// frame source. The closure is called once per tick and returns a
-/// `Vec<u8>` of BGRA bytes sized exactly `width * height * 4`. Anything
-/// else is logged and skipped (matching the runtime behavior for
-/// transient capture failures).
-///
-/// Returning `Err` is treated the same as a capture failure — logged
-/// and the loop sleeps one interval before retrying. Returning a
-/// sentinel `Err` with message "stop" tells the loop to exit cleanly,
-/// which test code uses to terminate finite-frame scenarios.
+/// `CaptureOutcome` (see the enum for semantics).
 pub fn spawn_with_source<F>(
     width: u32,
     height: u32,
@@ -109,7 +117,7 @@ pub fn spawn_with_source<F>(
     mut capture: F,
 ) -> mpsc::Receiver<EncodedFrame>
 where
-    F: FnMut() -> anyhow::Result<Vec<u8>> + Send + 'static,
+    F: FnMut() -> CaptureOutcome + Send + 'static,
 {
     let (tx, rx) = mpsc::channel::<EncodedFrame>(8);
     let interval = Duration::from_micros(1_000_000 / target_fps.max(1) as u64);
@@ -125,9 +133,9 @@ where
         loop {
             let frame_start = Instant::now();
             let bgra = match capture() {
-                Ok(b) => b,
-                Err(e) if e.to_string() == "stop" => break,
-                Err(e) => {
+                CaptureOutcome::Frame(b) => b,
+                CaptureOutcome::Stop => break,
+                CaptureOutcome::Skip(e) => {
                     tracing::warn!("screen_stream: capture: {}", e);
                     std::thread::sleep(interval);
                     continue;
@@ -236,7 +244,7 @@ mod tests {
         let mut rx = spawn_with_source(64, 48, 60, move || {
             let i = counter_for_source.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if i >= 5 {
-                return Err(anyhow::anyhow!("stop"));
+                return CaptureOutcome::Stop;
             }
             let mut bgra = vec![0u8; 64 * 48 * 4];
             // Animate so each frame differs (encoder produces real
@@ -245,7 +253,7 @@ mod tests {
                 px[1] = (i * 40) as u8;
                 px[3] = 255;
             }
-            Ok(bgra)
+            CaptureOutcome::Frame(bgra)
         });
         let mut received = 0;
         while let Some(f) = rx.recv().await {
@@ -269,11 +277,11 @@ mod tests {
         let mut rx = spawn_with_source(64, 48, 240, move || {
             let i = counter_for_source.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if i < 3 {
-                Err(anyhow::anyhow!("transient capture failure"))
+                CaptureOutcome::Skip(anyhow::anyhow!("transient capture failure"))
             } else if i == 3 {
-                Ok(vec![100u8; 64 * 48 * 4])
+                CaptureOutcome::Frame(vec![100u8; 64 * 48 * 4])
             } else {
-                Err(anyhow::anyhow!("stop"))
+                CaptureOutcome::Stop
             }
         });
         let f = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -290,9 +298,9 @@ mod tests {
         let mut rx = spawn_with_source(64, 48, 60, move || {
             let i = counter_for_source.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if i >= 4 {
-                return Err(anyhow::anyhow!("stop"));
+                return CaptureOutcome::Stop;
             }
-            Ok(vec![(i * 30) as u8; 64 * 48 * 4])
+            CaptureOutcome::Frame(vec![(i * 30) as u8; 64 * 48 * 4])
         });
         let mut prev_pts = 0u64;
         while let Some(f) = rx.recv().await {

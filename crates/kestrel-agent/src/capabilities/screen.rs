@@ -34,6 +34,18 @@ pub fn list_displays() -> Vec<(usize, u32, u32)> {
         .collect()
 }
 
+/// Returns `(width, height)` for the primary display. Falls back to
+/// 1920x1080 when no display is detected (headless CI / sandboxed
+/// agents). Shared by the input-injection path (which needs to
+/// denormalize 0.0..1.0 mouse coords) and the WebRTC capture path.
+pub fn primary_display_dims() -> (u32, u32) {
+    list_displays()
+        .into_iter()
+        .next()
+        .map(|(_, w, h)| (w, h))
+        .unwrap_or((1920, 1080))
+}
+
 /// Capture the full display at `idx` and return PNG bytes.
 pub fn capture_display(idx: usize) -> anyhow::Result<Vec<u8>> {
     let monitors = Monitor::all().context("xcap Monitor::all failed")?;

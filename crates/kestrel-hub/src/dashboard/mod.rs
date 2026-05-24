@@ -82,13 +82,14 @@ pub struct AppState {
     pub webrtc_sessions: crate::webrtc::SessionRegistry,
     /// Phase 11b: optional multi-tenant policy. When `Some`, MCP
     /// callers' bearer tokens are resolved to per-user identities
-    /// + per-op/per-node policy decisions; pending approvals queue
+    /// and per-op/per-node policy decisions; pending approvals queue
     /// here. When `None`, the legacy single-token control plane
     /// applies and policy is a no-op.
     pub policy: Option<std::sync::Arc<crate::policy::PolicyConfig>>,
     pub approvals: crate::policy::ApprovalRegistry,
-    /// Phase 11b OIDC providers (Google, GitHub, custom). Operator
-    /// registers them in kestrel-policy.toml; the
+    /// Phase 11b OIDC providers (Google, Okta, Auth0, Keycloak, etc).
+    /// GitHub is intentionally absent — see `oidc::OidcProvider.issuer`.
+    /// The operator registers providers in kestrel-policy.toml; the
     /// /oauth/<name>/login and /oauth/<name>/callback endpoints
     /// drive the auth-code flow.
     pub oidc_providers: Vec<std::sync::Arc<crate::oidc::OidcProvider>>,
@@ -139,16 +140,13 @@ impl AppState {
         let session_key = Zeroizing::new(kestrel_proto::derive_session_signing_key(&master_secret));
         let webrtc_sessions = crate::webrtc::SessionRegistry::new();
         // Phase 13b: attach the SessionRegistry to NodeRegistry so the
-        // supervisor's webrtc_pump can deposit agent-originated
-        // SDP answers / ICE candidates as they arrive. Best-effort:
-        // attach is fire-and-forget; failure to attach (impossible
-        // unless we change the API to fallible) just means the dashboard
-        // never gets answers back.
-        let attach_reg = registry.clone();
-        let attach_sessions = webrtc_sessions.clone();
-        tokio::spawn(async move {
-            attach_reg.attach_webrtc_sessions(attach_sessions).await;
-        });
+        // supervisor's webrtc_pump can deposit agent-originated SDP
+        // answers / ICE candidates as they arrive. Synchronous: must
+        // complete before the supervisor starts so early events can't
+        // race the attach. The setter is a `std::sync::OnceLock::set`
+        // — first wins; a second attach (which shouldn't happen) is
+        // a silent no-op.
+        registry.attach_webrtc_sessions(webrtc_sessions.clone());
         AppState {
             registry,
             config_path,
@@ -177,7 +175,7 @@ impl AppState {
 
     /// Phase 11b: install a multi-tenant policy. When present,
     /// mutation endpoints resolve the caller's bearer to a user_id
-    /// + apply per-op/per-node policy. Approval gates use the
+    /// and apply per-op/per-node policy. Approval gates use the
     /// ApprovalRegistry (already wired). When absent, the legacy
     /// single-control_token flow applies.
     pub fn with_policy(mut self, policy: crate::policy::PolicyConfig) -> Self {
@@ -245,6 +243,7 @@ const ASSET_HTMX_MIN_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
 const ASSET_HTMX_SSE_JS: &[u8] = include_bytes!("../../assets/htmx-sse.js");
 const ASSET_SHELL_JS: &[u8] = include_bytes!("../../assets/shell.js");
 const ASSET_WEBRTC_JS: &[u8] = include_bytes!("../../assets/webrtc.js");
+const ASSET_NODE_DETAIL_JS: &[u8] = include_bytes!("../../assets/node-detail.js");
 
 async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
     let (bytes, mime): (&'static [u8], &'static str) = match name.as_str() {
@@ -253,6 +252,7 @@ async fn asset_handler(Path(name): Path<String>) -> impl IntoResponse {
         "htmx-sse.js" => (ASSET_HTMX_SSE_JS, "application/javascript; charset=utf-8"),
         "shell.js" => (ASSET_SHELL_JS, "application/javascript; charset=utf-8"),
         "webrtc.js" => (ASSET_WEBRTC_JS, "application/javascript; charset=utf-8"),
+        "node-detail.js" => (ASSET_NODE_DETAIL_JS, "application/javascript; charset=utf-8"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()

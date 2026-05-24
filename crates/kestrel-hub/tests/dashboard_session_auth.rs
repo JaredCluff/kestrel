@@ -52,7 +52,7 @@ fn build_app_with_master(master: Vec<u8>) -> (axum::Router, AppState) {
 /// Pull `kestrel_session=<value>` out of a Set-Cookie header.
 fn cookie_value_from_set_cookie(set_cookie: &str) -> Option<&str> {
     let after_eq = set_cookie.strip_prefix("kestrel_session=")?;
-    Some(after_eq.split(';').next()?)
+    after_eq.split(';').next()
 }
 
 #[tokio::test]

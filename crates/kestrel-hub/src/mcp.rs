@@ -141,6 +141,11 @@ pub struct KestrelMcp {
     /// `kestrel-hub start`, not here.
     sandboxes: crate::sandbox::SandboxRegistry,
     audit: crate::audit::AuditLogger,
+    // Required by rmcp's `#[tool_router]` macro — the macro expands
+    // `Self::tool_router()` and stamps it onto a field of this name.
+    // We never read it directly; the macro-generated `ServerHandler`
+    // impl does. Without the allow, the compiler flags it as dead.
+    #[allow(dead_code)]
     tool_router: ToolRouter<KestrelMcp>,
 }
 

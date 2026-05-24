@@ -19,19 +19,10 @@
 //      to the <video> element serialize events as JSON and send.
 
 (function () {
-    function csrfToken() {
-        const cookie = document.cookie
-            .split('; ')
-            .find(c => c.startsWith('csrf_token='));
-        return cookie ? cookie.split('=')[1] : '';
-    }
-
-    function withCsrf(headers) {
-        const h = Object.assign({ 'content-type': 'application/json' }, headers || {});
-        const t = csrfToken();
-        if (t) h['x-csrf-token'] = t;
-        return h;
-    }
+    // CSRF is handled by the session cookie's SameSite=Strict attribute
+    // (set by /login) — cross-site requests can't carry it, so a same-
+    // origin JSON content-type is sufficient. No separate CSRF token.
+    const JSON_HEADERS = { 'content-type': 'application/json' };
 
     function wireInputEvents(videoEl, channel) {
         // We attach handlers to the <video> element rather than window
@@ -91,7 +82,7 @@
         start: async function (nodeId, videoEl) {
             // 1. Create session.
             const createResp = await fetch('/api/webrtc/session', {
-                method: 'POST', headers: withCsrf(),
+                method: 'POST', headers: JSON_HEADERS,
                 body: JSON.stringify({ node_id: nodeId }),
             });
             if (!createResp.ok) throw new Error('session create failed: ' + createResp.status);
@@ -113,7 +104,7 @@
             pc.onicecandidate = (e) => {
                 if (e.candidate) {
                     fetch(`/api/webrtc/session/${session_id}/ice`, {
-                        method: 'POST', headers: withCsrf(),
+                        method: 'POST', headers: JSON_HEADERS,
                         body: JSON.stringify({ candidate_json: JSON.stringify(e.candidate) }),
                     }).catch(() => { /* fire-and-forget */ });
                 }
@@ -124,7 +115,7 @@
             await pc.setLocalDescription(offer);
             const offerB64 = btoa(offer.sdp);
             await fetch(`/api/webrtc/session/${session_id}/offer`, {
-                method: 'POST', headers: withCsrf(),
+                method: 'POST', headers: JSON_HEADERS,
                 body: JSON.stringify({ sdp_b64: offerB64 }),
             });
 
