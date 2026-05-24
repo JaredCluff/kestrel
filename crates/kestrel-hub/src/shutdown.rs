@@ -135,11 +135,17 @@ impl Shutdown {
         if self.fired.load(Ordering::SeqCst) {
             return;
         }
-        // Park. There's no "miss-the-notify" race because notify_waiters
-        // wakes us iff we registered with notified() BEFORE signal()
-        // ran, and the second check below catches the case where signal
-        // fired between the load and the notified() registration.
+        // The classic Notify pattern. `notified()` returns a future
+        // that ONLY registers as a waiter when polled or enabled, so a
+        // naive `let n = ...; if fired { return; } n.await;` has a
+        // window where signal() can fire between the second `fired`
+        // check and the first poll of `n` — `notify_waiters()` walks
+        // an empty waiter list and our future then parks forever.
+        // `pin!` + `enable()` registers the waiter eagerly, BEFORE the
+        // second flag check, so notify_waiters always sees us.
         let n = self.notify.notified();
+        tokio::pin!(n);
+        n.as_mut().enable();
         if self.fired.load(Ordering::SeqCst) {
             return;
         }
@@ -208,5 +214,40 @@ mod tests {
         assert!(!s.is_shutting_down());
         s.signal();
         assert!(s.is_shutting_down());
+    }
+
+    /// Race regression: in the prior implementation, `wait()` created
+    /// the Notified future but didn't enable it before the second
+    /// `fired` check. If `signal()` fired exactly in that window, the
+    /// notify_waiters call walked an empty waiter list and the
+    /// subsequent `.await` would park forever.
+    ///
+    /// This test reproduces the timing window with many parallel waiters
+    /// and a near-simultaneous signal. Without the `pin!` + `enable()`
+    /// fix, this hangs reliably under load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_lost_wakeup_when_signal_races_with_wait_registration() {
+        for _ in 0..50 {
+            let s = Shutdown::new();
+            // Spawn many waiters, then signal almost-simultaneously.
+            let mut handles = Vec::with_capacity(16);
+            for _ in 0..16 {
+                let waiter = s.clone();
+                handles.push(tokio::spawn(async move { waiter.wait().await }));
+            }
+            // Yield a few times so spawned tasks get a chance to enter
+            // wait(), but with no fixed delay so the race window
+            // varies across iterations.
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+            s.signal();
+            for h in handles {
+                tokio::time::timeout(Duration::from_secs(1), h)
+                    .await
+                    .expect("waiter hung past 1s — lost wakeup race")
+                    .expect("waiter task panicked");
+            }
+        }
     }
 }

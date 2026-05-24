@@ -73,10 +73,11 @@ pub async fn start_agent(node_id: &str) -> SocketAddr {
 /// [`test_master`] + `node_id`, matching production. Tests that
 /// exercise the supervisor's PSK derivation (per_node_psk_rejection,
 /// phase5_reconnect, phase_6_13_integration) should use this.
-pub async fn start_agent_with_master(node_id: &'static str) -> SocketAddr {
+pub async fn start_agent_with_master(node_id: &str) -> SocketAddr {
     let psk = derive_test_psk(node_id);
+    let node_id_owned = node_id.to_string();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let cfg = AgentConfig::new("127.0.0.1:0".parse().unwrap(), node_id.into(), psk);
+    let cfg = AgentConfig::new("127.0.0.1:0".parse().unwrap(), node_id_owned, psk);
     tokio::spawn(async move {
         let _ = kestrel_agent::transport::serve(&cfg, Some(ready_tx)).await;
     });

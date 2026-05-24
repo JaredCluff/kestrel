@@ -181,9 +181,14 @@ async fn audit_log_throughput_baseline() {
     }
     let elapsed = start.elapsed();
     let writes_per_sec = (N as f64) / elapsed.as_secs_f64();
+    // Threshold is 500/sec, not 1000 — gives 2× safety margin on
+    // slow CI runners with HDD-like fsync latency while still
+    // catching the regression we care about: a per-write fsync
+    // (instead of every-50) drops throughput to ~20/sec on the
+    // same hardware, well below this floor.
     assert!(
-        writes_per_sec >= 1000.0,
-        "audit log throughput dropped below 1000/sec (got {:.0}/sec, elapsed={:?}). \
+        writes_per_sec >= 500.0,
+        "audit log throughput dropped below 500/sec (got {:.0}/sec, elapsed={:?}). \
          A per-write fsync was likely added accidentally.",
         writes_per_sec,
         elapsed
