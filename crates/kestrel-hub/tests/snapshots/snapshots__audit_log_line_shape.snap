@@ -1,0 +1,14 @@
+---
+source: crates/kestrel-hub/tests/snapshots.rs
+expression: json
+---
+{
+  "args": "command=ls -la /tmp",
+  "duration_ms": 142,
+  "error": null,
+  "node_id": "macstudio",
+  "op": "shell_run",
+  "status": "ok",
+  "ts": "<REDACTED>",
+  "ts_unix": "<REDACTED>"
+}

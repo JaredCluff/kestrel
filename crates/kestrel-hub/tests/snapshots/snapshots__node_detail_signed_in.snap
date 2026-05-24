@@ -1,0 +1,5 @@
+---
+source: crates/kestrel-hub/tests/snapshots.rs
+expression: normalize_html(&html)
+---
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Kestrel — alpha</title><link rel="stylesheet" href="/assets/dashboard.css"><script src="/assets/webrtc.js"></script><style>video.kestrel-stream { width:100%; max-width:1280px; background:#000; display:block; outline:none; cursor:crosshair; }</style></head><body><main><header><a href="/">← Nodes</a><span class="count">alpha</span><span class="auth"><form method="post" action="/logout"><button class="linkish" type="submit">Sign out</button></form></span></header><video class="kestrel-stream" id="kv" data-node-id="alpha" autoplay muted playsinline></video><script src="/assets/node-detail.js"></script></main></body></html>

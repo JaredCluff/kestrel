@@ -1,0 +1,5 @@
+---
+source: crates/kestrel-hub/tests/snapshots.rs
+expression: normalize_html(&html)
+---
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Kestrel — sign in</title><link rel="stylesheet" href="/assets/dashboard.css"></head><body><main><header><span>Sign in</span></header><form method="post" action="/login"><input type="password" name="token" placeholder="control token" required autocomplete="current-password" autofocus><button type="submit">Continue</button></form></main></body></html>
