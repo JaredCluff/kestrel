@@ -26,29 +26,12 @@ use tokio::net::TcpListener;
 
 use kestrel_hub::dashboard::{router, AppState};
 use kestrel_hub::router::NodeRegistry;
+use kestrel_test::{starter_toml, test_master};
 
 const HUB_TOKEN: &str = "test-control-token-layout-cli-aa";
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_kestrel-hub")
-}
-
-fn test_master() -> Vec<u8> {
-    b"kestrel-test-master-32bytes-pad!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
 }
 
 async fn spawn_hub_with_token(config_path: &std::path::Path) -> String {

@@ -12,38 +12,14 @@ use std::time::Instant;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use kestrel_hub::dashboard::{router, AppState, CachedScreenshot};
-use kestrel_hub::router::NodeRegistry;
+use kestrel_hub::dashboard::{AppState, CachedScreenshot};
+use kestrel_test::build_app_with_token;
 use tower::ServiceExt;
 
 const TOKEN: &str = "test-control-token-screenshot-aa";
 
-fn test_master() -> Vec<u8> {
-    b"kestrel-test-master-32bytes-pad!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
-}
-
 fn build_app() -> (axum::Router, AppState) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = starter_toml(dir.path()).to_str().unwrap().to_string();
-    let registry = Arc::new(NodeRegistry::new());
-    let state = AppState::new(registry, path, test_master())
-        .with_control_token(TOKEN.into());
-    Box::leak(Box::new(dir));
-    (router(state.clone()), state)
+    build_app_with_token(TOKEN)
 }
 
 /// Pre-populate the cache with a fixed PNG so we can serve from cache

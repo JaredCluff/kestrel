@@ -15,22 +15,10 @@
 // since they touch neither the keyring nor the file.
 use std::process::Command;
 
+use kestrel_test::starter_toml;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_kestrel-hub")
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
 }
 
 #[test]

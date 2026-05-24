@@ -10,53 +10,16 @@
 // to /login when unauthenticated, and render an inline error on a
 // bad address rather than crashing.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
-use kestrel_hub::dashboard::{router, session, AppState};
-use kestrel_hub::router::NodeRegistry;
+use kestrel_hub::dashboard::AppState;
+use kestrel_test::{build_app_with_token, cookie_for};
 use tower::ServiceExt;
 
 const TOKEN: &str = "test-control-token-aaaaaaaaaaaaaa";
 
-fn test_master() -> Vec<u8> {
-    b"kestrel-test-master-32bytes-pad!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
-}
-
 fn build_app() -> (axum::Router, AppState) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = starter_toml(dir.path()).to_str().unwrap().to_string();
-    let registry = Arc::new(NodeRegistry::new());
-    let state = AppState::new(registry, path, test_master()).with_control_token(TOKEN.into());
-    Box::leak(Box::new(dir));
-    (router(state.clone()), state)
-}
-
-fn cookie_for(state: &AppState) -> String {
-    let (set_cookie, _) =
-        session::set_cookie_header(&state.session_key, session::DEFAULT_SESSION_TTL_SECS);
-    let value = set_cookie
-        .strip_prefix("kestrel_session=")
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
-    format!("kestrel_session={}", value)
+    build_app_with_token(TOKEN)
 }
 
 #[tokio::test]

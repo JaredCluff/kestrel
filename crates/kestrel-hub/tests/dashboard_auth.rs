@@ -3,42 +3,16 @@
 // Verify that mutation endpoints (POST /api/nodes, DELETE /api/nodes/:id)
 // require `Authorization: Bearer <control_token>` when the AppState has a
 // control_token set. Read-only endpoints stay open either way.
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use kestrel_hub::dashboard::{AppState, router};
-use kestrel_hub::router::NodeRegistry;
+use kestrel_hub::dashboard::AppState;
+use kestrel_test::{build_app, build_app_with_token};
 use tower::ServiceExt;
 
 const TOKEN: &str = "test-control-token-123456789abcdef";
 
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
-}
-
 fn app_with_token() -> (axum::Router, AppState) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = starter_toml(dir.path()).to_str().unwrap().to_string();
-    let registry = Arc::new(NodeRegistry::new());
-    let state = AppState::new(registry, path, test_psk()).with_control_token(TOKEN.into());
-    // Leak the tempdir so the path stays valid for the test's duration.
-    Box::leak(Box::new(dir));
-    (router(state.clone()), state)
+    build_app_with_token(TOKEN)
 }
 
 #[tokio::test]
@@ -123,11 +97,7 @@ async fn read_only_endpoints_stay_open_without_token() {
 #[tokio::test]
 async fn auth_disabled_state_accepts_unauthenticated_mutations() {
     // Build a state with no control_token — legacy/no-auth mode.
-    let dir = tempfile::tempdir().unwrap();
-    let path = starter_toml(dir.path()).to_str().unwrap().to_string();
-    let registry = Arc::new(NodeRegistry::new());
-    let state = AppState::new(registry, path, test_psk()); // no .with_control_token(...)
-    let app = router(state);
+    let (app, _state) = build_app();
 
     let body = serde_json::json!({"node_id": "x", "address": "127.0.0.1:65533"});
     let req = Request::builder()
@@ -158,11 +128,7 @@ async fn auth_disabled_state_accepts_unauthenticated_deletes() {
     // Symmetric to the POST-side test above. Without this, a future refactor
     // could tighten DELETE auth but leave POST open (or vice versa) without
     // anything failing.
-    let dir = tempfile::tempdir().unwrap();
-    let path = starter_toml(dir.path()).to_str().unwrap().to_string();
-    let registry = Arc::new(NodeRegistry::new());
-    let state = AppState::new(registry, path, test_psk());
-    let app = router(state);
+    let (app, _state) = build_app();
 
     // Pre-add a node so DELETE has something to remove.
     let body = serde_json::json!({"node_id": "x", "address": "127.0.0.1:65534"});

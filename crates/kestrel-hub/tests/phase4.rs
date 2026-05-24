@@ -1,20 +1,6 @@
 // crates/kestrel-hub/tests/phase4.rs
-use std::net::SocketAddr;
-use kestrel_agent::config::AgentConfig;
 use kestrel_hub::transport::connect;
-
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
-}
-
-async fn start_agent(node_id: &str) -> SocketAddr {
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let cfg = AgentConfig::new("127.0.0.1:0".parse().unwrap(), node_id.into(), test_psk());
-    tokio::spawn(async move {
-        kestrel_agent::transport::serve(&cfg, Some(ready_tx)).await.unwrap();
-    });
-    ready_rx.await.expect("agent did not send bound address")
-}
+use kestrel_test::{start_agent, test_psk};
 
 #[tokio::test]
 async fn test_describe_returns_valid_node() {

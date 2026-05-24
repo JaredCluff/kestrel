@@ -10,11 +10,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use kestrel_hub::dashboard::{AppState, router};
 use kestrel_hub::router::NodeRegistry;
+use kestrel_test::test_psk;
 use tower::ServiceExt;
-
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
-}
 
 fn app() -> axum::Router {
     let registry = Arc::new(NodeRegistry::new());

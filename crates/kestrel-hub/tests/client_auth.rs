@@ -11,28 +11,11 @@ use std::sync::Arc;
 use kestrel_hub::client::HubClient;
 use kestrel_hub::dashboard::{AppState, router};
 use kestrel_hub::router::NodeRegistry;
+use kestrel_test::{starter_toml, test_psk};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
 const TOKEN: &str = "test-control-token-deadbeef";
-
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
-}
 
 /// Spin up the dashboard router on a random port and return its base URL +
 /// the tempdir (held to keep the kestrel.toml alive for the test).

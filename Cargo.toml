@@ -3,6 +3,7 @@ members = [
     "crates/kestrel-proto",
     "crates/kestrel-agent",
     "crates/kestrel-hub",
+    "crates/kestrel-test",
 ]
 resolver = "2"
 
