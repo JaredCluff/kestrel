@@ -77,17 +77,51 @@ pub enum SessionStatus {
     Failed,
 }
 
-#[derive(Clone, Default)]
+/// Default cap on simultaneously-non-Closed WebRTC sessions across
+/// the whole hub. Bounded so a buggy or hostile browser script can't
+/// exhaust hub memory by spamming POST /api/webrtc/session.
+/// Operator can override via `SessionRegistry::with_max_concurrent`.
+pub const DEFAULT_MAX_CONCURRENT_SESSIONS: usize = 16;
+
+#[derive(Clone)]
 pub struct SessionRegistry {
     inner: Arc<RwLock<HashMap<SessionId, Session>>>,
+    max_concurrent: usize,
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            max_concurrent: DEFAULT_MAX_CONCURRENT_SESSIONS,
+        }
+    }
 }
 
 impl SessionRegistry {
     pub fn new() -> Self { Self::default() }
 
-    /// Create a new session targeting `node_id`. Returns the new id;
-    /// the dashboard polls + POSTs further state transitions.
-    pub async fn create(&self, node_id: String) -> SessionId {
+    /// Override the cap on simultaneously-non-Closed sessions.
+    /// Closed/Failed entries don't count toward the cap.
+    pub fn with_max_concurrent(mut self, n: usize) -> Self {
+        self.max_concurrent = n.max(1);
+        self
+    }
+
+    /// Create a new session targeting `node_id`. Returns the new id
+    /// on success, or `None` when the live-session cap is hit — the
+    /// HTTP layer maps that to 503 so the browser can back off.
+    pub async fn create(&self, node_id: String) -> Option<SessionId> {
+        let mut map = self.inner.write().await;
+        let live = map
+            .values()
+            .filter(|s| {
+                !matches!(s.status, SessionStatus::Closed | SessionStatus::Failed)
+            })
+            .count();
+        if live >= self.max_concurrent {
+            return None;
+        }
         let id = fresh_session_id();
         let sess = Session {
             id: id.clone(),
@@ -98,8 +132,8 @@ impl SessionRegistry {
             answer_b64: None,
             ice_candidates: vec![],
         };
-        self.inner.write().await.insert(id.clone(), sess);
-        id
+        map.insert(id.clone(), sess);
+        Some(id)
     }
 
     /// Build a hub-side PeerConnection ready to accept the browser's
@@ -208,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn create_and_lookup_session() {
         let reg = SessionRegistry::new();
-        let id = reg.create("alpha".into()).await;
+        let id = reg.create("alpha".into()).await.unwrap();
         let s = reg.get(&id).await.unwrap();
         assert_eq!(s.node_id, "alpha");
         assert_eq!(s.status, SessionStatus::Created);
@@ -218,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn state_transitions_offer_answer_connected() {
         let reg = SessionRegistry::new();
-        let id = reg.create("alpha".into()).await;
+        let id = reg.create("alpha".into()).await.unwrap();
         assert!(reg.record_offer(&id, "offer-bytes".into()).await);
         assert_eq!(reg.get(&id).await.unwrap().status, SessionStatus::OfferReceived);
         assert!(reg.record_answer(&id, "answer-bytes".into()).await);
@@ -232,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn record_ice_accumulates_in_arrival_order() {
         let reg = SessionRegistry::new();
-        let id = reg.create("alpha".into()).await;
+        let id = reg.create("alpha".into()).await.unwrap();
         for c in ["c1", "c2", "c3"] {
             reg.record_ice(&id, c.into()).await;
         }
@@ -253,12 +287,38 @@ mod tests {
     #[tokio::test]
     async fn list_is_sorted_by_id() {
         let reg = SessionRegistry::new();
-        let _ = reg.create("c".into()).await;
-        let _ = reg.create("a".into()).await;
-        let _ = reg.create("b".into()).await;
+        let _ = reg.create("c".into()).await.unwrap();
+        let _ = reg.create("a".into()).await.unwrap();
+        let _ = reg.create("b".into()).await.unwrap();
         let list = reg.list().await;
         // Session ids are randomly generated; can't assert specific
         // order. Just confirm we got 3 entries.
         assert_eq!(list.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn create_returns_none_above_concurrency_cap() {
+        let reg = SessionRegistry::new().with_max_concurrent(2);
+        assert!(reg.create("a".into()).await.is_some());
+        assert!(reg.create("b".into()).await.is_some());
+        assert!(
+            reg.create("c".into()).await.is_none(),
+            "third create should fail the cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_frees_a_cap_slot() {
+        let reg = SessionRegistry::new().with_max_concurrent(2);
+        let id_a = reg.create("a".into()).await.unwrap();
+        let _id_b = reg.create("b".into()).await.unwrap();
+        // c blocked.
+        assert!(reg.create("c".into()).await.is_none());
+        // Close a → c can now go through.
+        reg.mark_closed(&id_a).await;
+        assert!(
+            reg.create("c".into()).await.is_some(),
+            "Closed entry shouldn't count toward the cap"
+        );
     }
 }

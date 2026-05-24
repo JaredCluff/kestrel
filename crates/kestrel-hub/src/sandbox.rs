@@ -65,7 +65,20 @@ pub struct SandboxRegistry {
     /// into the guest with the per-node PSK. None preserves today's
     /// behavior (operator handles agent install themselves).
     bootstrap: Option<Arc<BootstrapCtx>>,
+    /// Cap on simultaneously-live sandboxes (Provisioning or Ready
+    /// status). Prevents an AI loop that spawns sandboxes-in-error
+    /// from exhausting Tart/Lima/Hyper-V resources on the hub host.
+    /// Spawn returns Err when the cap is hit; the operator can either
+    /// destroy expired sandboxes via the reaper / `sandbox_destroy`
+    /// or raise the cap.
+    max_concurrent: usize,
 }
+
+/// Default ceiling on simultaneously-live sandboxes. 8 is a soft
+/// number that fits comfortably on a typical dev workstation while
+/// still letting a workflow spawn a few in parallel. Operator can
+/// raise via `SandboxRegistry::with_max_concurrent`.
+pub const DEFAULT_MAX_CONCURRENT_SANDBOXES: usize = 8;
 
 /// Together: a static bootstrap config + the hub's master_secret
 /// (needed to derive each sandbox's per-node PSK at install time).
@@ -83,7 +96,20 @@ impl Default for SandboxRegistry {
 
 impl SandboxRegistry {
     pub fn new() -> Self {
-        Self { inner: Arc::new(RwLock::new(HashMap::new())), bootstrap: None }
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            bootstrap: None,
+            max_concurrent: DEFAULT_MAX_CONCURRENT_SANDBOXES,
+        }
+    }
+
+    /// Override the per-hub cap on simultaneously-live sandboxes.
+    /// Pre-existing sandboxes aren't counted against the cap until
+    /// they finish provisioning; once Ready, they count toward it.
+    /// Destroyed/Failed entries don't.
+    pub fn with_max_concurrent(mut self, n: usize) -> Self {
+        self.max_concurrent = n.max(1); // 0 would deadlock — refuse silently
+        self
     }
 
     /// Attach an auto-installer that runs after a backend reports
@@ -118,6 +144,21 @@ impl SandboxRegistry {
         };
         {
             let mut map = self.inner.write().await;
+            // Enforce the live-sandbox cap. "Live" = Provisioning OR
+            // Ready; Destroyed/Failed entries linger in the map for
+            // listing purposes but don't count.
+            let live = map
+                .values()
+                .filter(|s| matches!(s.status, SandboxStatus::Provisioning | SandboxStatus::Ready))
+                .count();
+            if live >= self.max_concurrent {
+                anyhow::bail!(
+                    "sandbox cap reached: {} live (max {}). Run `sandbox_destroy` on \
+                     unused entries or wait for the auto-reaper to clear expired ones.",
+                    live,
+                    self.max_concurrent
+                );
+            }
             map.insert(id.clone(), entry);
         }
         // Spawn the provisioning task. Updates the entry's status
@@ -463,5 +504,35 @@ mod tests {
     async fn destroy_unknown_returns_false() {
         let reg = SandboxRegistry::new();
         assert!(!reg.destroy("sb-nope").await);
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_above_concurrency_cap() {
+        // Cap of 2; the third spawn should bail out before allocating
+        // a slot, regardless of whether the underlying backend works.
+        // We don't drive provisioning to Ready here — the cap is
+        // evaluated on whatever lives in the map at spawn time, which
+        // includes Provisioning entries.
+        let reg = SandboxRegistry::new().with_max_concurrent(2);
+        let _a = reg.spawn("img", 3600).await.unwrap();
+        let _b = reg.spawn("img", 3600).await.unwrap();
+        let err = reg.spawn("img", 3600).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cap reached") && msg.contains("max 2"),
+            "expected cap-reached error, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn with_max_concurrent_floors_at_one() {
+        // Zero would be a footgun (spawn would always fail). Silently
+        // clamp to 1 — caller almost certainly meant "no concurrency,
+        // one at a time."
+        let reg = SandboxRegistry::new().with_max_concurrent(0);
+        let _a = reg.spawn("img", 3600).await.unwrap();
+        let err = reg.spawn("img", 3600).await.unwrap_err();
+        assert!(err.to_string().contains("cap reached"));
     }
 }

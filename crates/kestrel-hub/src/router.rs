@@ -759,7 +759,7 @@ mod tests {
     async fn webrtc_event_answer_base64_encodes_for_browser() {
         let r = NodeRegistry::new();
         let sessions = crate::webrtc::SessionRegistry::new();
-        let id = sessions.create("alpha".into()).await;
+        let id = sessions.create("alpha".into()).await.unwrap();
         r.attach_webrtc_sessions(sessions.clone());
 
         let raw_sdp = "v=0\r\no=- 7 1 IN IP4 0.0.0.0\r\nm=video 0 RTP/SAVPF 96\r\n";
@@ -784,7 +784,7 @@ mod tests {
     async fn webrtc_event_ice_passes_through_unchanged() {
         let r = NodeRegistry::new();
         let sessions = crate::webrtc::SessionRegistry::new();
-        let id = sessions.create("alpha".into()).await;
+        let id = sessions.create("alpha".into()).await.unwrap();
         r.attach_webrtc_sessions(sessions.clone());
 
         let candidate = r#"{"candidate":"candidate:1 1 udp 2113937151 192.168.1.5 53124 typ host","sdpMid":"0","sdpMLineIndex":0}"#;
