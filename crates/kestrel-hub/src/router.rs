@@ -729,4 +729,89 @@ mod tests {
         assert!(r.world_diff_since("alpha", 100).await.is_none());
         assert!(r.world_diff_since("alpha", 200).await.is_none());
     }
+
+    // ── Phase 13b WebRTC event recording ──────────────────────────────────
+
+    #[tokio::test]
+    async fn webrtc_event_without_attached_sessions_is_silent_no_op() {
+        let r = NodeRegistry::new();
+        // No attach_webrtc_sessions call — record should drop silently.
+        r.record_webrtc_event(crate::transport::WebRtcEvent::Answer {
+            session_id: "rt-1".into(),
+            sdp: "v=0\r\n".into(),
+        })
+        .await;
+        r.record_webrtc_event(crate::transport::WebRtcEvent::Ice {
+            session_id: "rt-1".into(),
+            candidate: "{}".into(),
+        })
+        .await;
+        // No assertion needed beyond not panicking — the test passes
+        // by completing.
+    }
+
+    #[tokio::test]
+    async fn webrtc_event_answer_base64_encodes_for_browser() {
+        let r = NodeRegistry::new();
+        let sessions = crate::webrtc::SessionRegistry::new();
+        let id = sessions.create("alpha".into()).await;
+        r.attach_webrtc_sessions(sessions.clone()).await;
+
+        let raw_sdp = "v=0\r\no=- 7 1 IN IP4 0.0.0.0\r\nm=video 0 RTP/SAVPF 96\r\n";
+        r.record_webrtc_event(crate::transport::WebRtcEvent::Answer {
+            session_id: id.clone(),
+            sdp: raw_sdp.into(),
+        })
+        .await;
+
+        let s = sessions.get(&id).await.unwrap();
+        let b64 = s.answer_b64.expect("answer recorded");
+        use base64::Engine;
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD.decode(&b64).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded, raw_sdp);
+        assert_eq!(s.status, crate::webrtc::SessionStatus::AnswerReady);
+    }
+
+    #[tokio::test]
+    async fn webrtc_event_ice_passes_through_unchanged() {
+        let r = NodeRegistry::new();
+        let sessions = crate::webrtc::SessionRegistry::new();
+        let id = sessions.create("alpha".into()).await;
+        r.attach_webrtc_sessions(sessions.clone()).await;
+
+        let candidate = r#"{"candidate":"candidate:1 1 udp 2113937151 192.168.1.5 53124 typ host","sdpMid":"0","sdpMLineIndex":0}"#;
+        r.record_webrtc_event(crate::transport::WebRtcEvent::Ice {
+            session_id: id.clone(),
+            candidate: candidate.into(),
+        })
+        .await;
+        r.record_webrtc_event(crate::transport::WebRtcEvent::Ice {
+            session_id: id.clone(),
+            candidate: r#"{"candidate":"end-of-candidates","sdpMid":"0"}"#.into(),
+        })
+        .await;
+
+        let s = sessions.get(&id).await.unwrap();
+        assert_eq!(s.ice_candidates.len(), 2);
+        assert_eq!(s.ice_candidates[0], candidate);
+    }
+
+    #[tokio::test]
+    async fn webrtc_event_for_unknown_session_is_silent() {
+        let r = NodeRegistry::new();
+        let sessions = crate::webrtc::SessionRegistry::new();
+        r.attach_webrtc_sessions(sessions.clone()).await;
+        // Session never created — record_answer returns false internally
+        // and we should NOT panic on the dropped result.
+        r.record_webrtc_event(crate::transport::WebRtcEvent::Answer {
+            session_id: "never-existed".into(),
+            sdp: "x".into(),
+        })
+        .await;
+        // No sessions exist.
+        assert!(sessions.list().await.is_empty());
+    }
 }
