@@ -240,8 +240,65 @@ async fn node_detail_page_renders_when_authed() {
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let html = String::from_utf8(bytes.to_vec()).unwrap();
     assert!(html.contains("<video"), "page must contain a <video> element");
-    assert!(html.contains("KestrelWebRTC.start"), "page must bootstrap the JS client");
+    assert!(
+        html.contains("/assets/node-detail.js"),
+        "page must reference the external bootstrap script"
+    );
+    assert!(
+        html.contains(r#"data-node-id="alpha""#),
+        "page must carry the node id via a data attribute"
+    );
     assert!(html.contains("alpha"), "page should reference the node id");
+}
+
+#[tokio::test]
+async fn node_detail_page_does_not_inject_node_id_into_script_context() {
+    // Regression: node_id is part of the URL path and was previously
+    // interpolated into an inline <script> block via Rust's `{:?}`
+    // debug formatter. Debug formatting escapes JS string delimiters
+    // but NOT HTML — so a node_id like `x</script><script>alert(1)`
+    // could break out of the script context entirely.
+    //
+    // After the fix, node_id flows via a data attribute on the <video>
+    // element. maud HTML-escapes attribute values, so `</script>`
+    // becomes `&lt;/script&gt;` in the HTML source — no XSS surface.
+    let (app, state) = build_app();
+    let cookie = cookie_for(&state);
+    // Percent-encode the payload by hand so we don't pull in a new
+    // dep for one test. axum's Path<String> percent-decodes; the
+    // handler sees the literal angle brackets + quotes.
+    let evil = "evil%3C%2Fscript%3E%3Cscript%3Ealert('xss')%3C%2Fscript%3E";
+    let url = format!("/node/{}", evil);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&url)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    // The unescaped `</script>` byte sequence must not appear inside
+    // any <script> block. Easiest defense: assert it doesn't appear
+    // anywhere except potentially as `&lt;/script&gt;`.
+    assert!(
+        !html.contains("</script><script>alert"),
+        "unescaped script-break sequence reached the page: {}",
+        html.lines()
+            .filter(|l| l.contains("alert"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // And confirm the data-attribute carrier is present.
+    assert!(
+        html.contains("data-node-id="),
+        "expected data-node-id attribute carrier"
+    );
 }
 
 #[tokio::test]

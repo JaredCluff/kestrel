@@ -237,6 +237,12 @@ async fn handle_conn(
     // arrive in trickled bursts after the SDP exchange completes.
     let mut webrtc_sessions: HashMap<String, Arc<webrtc_session::WebRtcSession>> =
         HashMap::new();
+    // Sessions report their own teardown here when the PC moves to
+    // Disconnected/Failed/Closed. The select! arm below drops the
+    // entry; without this the map would grow unboundedly across
+    // browser tab opens/closes for the lifetime of this connection.
+    let (webrtc_closed_tx, mut webrtc_closed_rx) =
+        tokio::sync::mpsc::channel::<String>(8);
 
     // Message loop — select! on incoming frames and outgoing shell events
     loop {
@@ -265,13 +271,13 @@ async fn handle_conn(
                         }
                     }
                     Payload::MouseMove { x, y } => {
-                        let (w, h) = primary_display_dims();
+                        let (w, h) = screen::primary_display_dims();
                         if let Err(e) = input::inject_mouse_move(x, y, w, h).await {
                             tracing::warn!("mouse_move error: {}", e);
                         }
                     }
                     Payload::MouseButton { button, action, x, y } => {
-                        let (w, h) = primary_display_dims();
+                        let (w, h) = screen::primary_display_dims();
                         if let Err(e) = input::inject_mouse_button(button, action, x, y, w, h).await {
                             tracing::warn!("mouse_button error: {}", e);
                         }
@@ -388,6 +394,7 @@ async fn handle_conn(
                             session_id.clone(),
                             sdp,
                             event_tx.clone(),
+                            webrtc_closed_tx.clone(),
                         ).await {
                             Ok(session) => {
                                 webrtc_sessions.insert(session_id, session);
@@ -458,17 +465,20 @@ async fn handle_conn(
                     tx.send(Message::Binary(bytes)).await?;
                 }
             }
+            closed_id = webrtc_closed_rx.recv() => {
+                // Channel can only close when this scope ends — receiver
+                // owns one of two senders (the held webrtc_closed_tx
+                // and any clones in active sessions), so recv() returning
+                // None means we're tearing down. Continue rather than
+                // matching exhaustively to avoid breaking out of the loop
+                // on a spurious wakeup.
+                if let Some(id) = closed_id {
+                    webrtc_sessions.remove(&id);
+                }
+            }
         }
     }
     Ok(())
-}
-
-fn primary_display_dims() -> (u32, u32) {
-    screen::list_displays()
-        .into_iter()
-        .next()
-        .map(|(_, w, h)| (w, h))
-        .unwrap_or((1920, 1080))
 }
 
 fn encode(msg: &KestrelMessage) -> anyhow::Result<Vec<u8>> {

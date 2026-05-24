@@ -102,6 +102,12 @@ impl AuditLogger {
     /// Append one entry. Best-effort: write errors are logged via
     /// `tracing::warn!` but never propagated — an unwriteable audit
     /// log must not break MCP tool calls.
+    ///
+    /// Eight parameters reflect the eight columns of the audit row.
+    /// Bundling them into a struct would force every call site to
+    /// construct a literal of equivalent shape — pure ceremony for an
+    /// internal write-only API with one caller per row.
+    #[allow(clippy::too_many_arguments)]
     pub async fn log_with_user(
         &self,
         user_id: Option<&str>,
@@ -224,7 +230,7 @@ fn format_rfc3339_utc(ts_unix: u64) -> String {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Minimal JSON-string escape. We only have to escape backslash, quote,

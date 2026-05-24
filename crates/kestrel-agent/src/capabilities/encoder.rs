@@ -22,8 +22,8 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     pub fn new(width: u32, height: u32, target_fps: u32) -> anyhow::Result<Self> {
-        anyhow::ensure!(width % 2 == 0, "width must be even (got {})", width);
-        anyhow::ensure!(height % 2 == 0, "height must be even (got {})", height);
+        anyhow::ensure!(width.is_multiple_of(2), "width must be even (got {})", width);
+        anyhow::ensure!(height.is_multiple_of(2), "height must be even (got {})", height);
 
         let config = openh264::encoder::EncoderConfig::new()
             .max_frame_rate(target_fps as f32)

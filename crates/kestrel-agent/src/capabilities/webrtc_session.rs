@@ -30,18 +30,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
-use crate::capabilities::{screen, screen_stream::{self, EncodedFrame}};
-
-/// Probe the agent's primary display dimensions for normalizing
-/// inbound mouse coordinates. Falls back to 1920x1080 when no
-/// display is detected (headless test environments).
-fn primary_display_dims() -> (u32, u32) {
-    screen::list_displays()
-        .into_iter()
-        .next()
-        .map(|(_, w, h)| (w, h))
-        .unwrap_or((1920, 1080))
-}
+use crate::capabilities::screen_stream::{self, EncodedFrame};
 
 /// Construct a fresh RTCPeerConnection with default codecs + Google's
 /// public STUN. Operators with NAT'd networks should replace this
@@ -178,7 +167,7 @@ pub async fn dispatch_input(
     display_w: u32,
     display_h: u32,
 ) -> anyhow::Result<()> {
-    use kestrel_proto::{Button, KeyCode, PressRelease};
+    use kestrel_proto::{Button, PressRelease};
 
     let to_press_release = |a: Action| match a {
         Action::Press => PressRelease::Press,
@@ -198,8 +187,15 @@ pub async fn dispatch_input(
 
     match event {
         InputEvent::Key { code, modifiers, action } => {
-            let key = key_from_dom_code(&code)
-                .ok_or_else(|| anyhow::anyhow!("unknown DOM key code: {}", code))?;
+            // An unknown DOM code is browser-controlled input that
+            // simply isn't mapped yet (e.g. F13+, IME composition,
+            // exotic layouts). Logging at warn for every such press
+            // would let a misbehaving page spam the agent's logs.
+            // Treat it as a benign no-op + debug trace instead.
+            let Some(key) = key_from_dom_code(&code) else {
+                tracing::debug!("webrtc input: ignoring unmapped DOM key code: {}", code);
+                return Ok(());
+            };
             crate::capabilities::input::inject_key_event(
                 key,
                 to_modifiers(modifiers),
@@ -325,16 +321,42 @@ pub async fn handle_offer(
     session_id: String,
     offer_sdp: String,
     event_tx: mpsc::Sender<KestrelMessage>,
+    closed_tx: mpsc::Sender<String>,
 ) -> anyhow::Result<Arc<WebRtcSession>> {
     let frames = screen_stream::spawn(0, 30);
     let session = Arc::new(WebRtcSession::new(frames).await?);
+
+    // Register a peer-connection-state-change handler so the transport
+    // loop can drop the session from its map when the PC moves to a
+    // terminal state. Without this, every browser tab that opens and
+    // closes a stream leaks one WebRtcSession (plus its RTCPeerConnection
+    // and associated capture thread state) for the lifetime of the
+    // agent's WS connection to the hub.
+    let pc = session.pc.clone();
+    let closed_tx_for_state = closed_tx.clone();
+    let sid_for_state = session_id.clone();
+    pc.on_peer_connection_state_change(Box::new(move |state| {
+        use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+        let tx = closed_tx_for_state.clone();
+        let sid = sid_for_state.clone();
+        Box::pin(async move {
+            if matches!(
+                state,
+                RTCPeerConnectionState::Disconnected
+                    | RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Closed
+            ) {
+                let _ = tx.send(sid).await;
+            }
+        })
+    }));
 
     // Wire input-event reception from the browser's data channel into
     // the agent's existing input capability. The browser opens an
     // "input" channel inside its offer (negotiated by SDP); this
     // handler fires on every inbound message regardless of channel
     // label so we don't have to plumb a separate channel-id config.
-    let (input_w, input_h) = primary_display_dims();
+    let (input_w, input_h) = crate::capabilities::screen::primary_display_dims();
     wire_input_channel(&session.pc, move |event| {
         Box::pin(async move {
             if let Err(e) = dispatch_input(event, input_w, input_h).await {

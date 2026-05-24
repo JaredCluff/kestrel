@@ -55,8 +55,11 @@ pub struct NodeRegistry {
     /// Phase 13b: optional WebRTC SessionRegistry. When wired (by
     /// the dashboard at startup), the supervisor's webrtc_pump
     /// folds agent-originated SDP answers / ICE candidates into it.
-    /// None for tests that don't exercise the WebRTC path.
-    webrtc_sessions: Arc<RwLock<Option<crate::webrtc::SessionRegistry>>>,
+    /// `OnceLock` (sync, lock-free read) instead of `RwLock<Option<_>>`
+    /// so the attach can complete BEFORE any supervisor starts — no
+    /// "deferred attach loses early events" race. Empty for tests
+    /// that don't exercise the WebRTC path.
+    webrtc_sessions: Arc<std::sync::OnceLock<crate::webrtc::SessionRegistry>>,
 }
 
 impl Default for NodeRegistry {
@@ -74,15 +77,18 @@ impl NodeRegistry {
             world: Arc::new(RwLock::new(HashMap::new())),
             capabilities: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            webrtc_sessions: Arc::new(RwLock::new(None)),
+            webrtc_sessions: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     /// Phase 13b: hand the registry a SessionRegistry so the
     /// supervisor's webrtc_pump knows where to deposit agent-originated
-    /// SDP answers / ICE candidates.
-    pub async fn attach_webrtc_sessions(&self, sessions: crate::webrtc::SessionRegistry) {
-        *self.webrtc_sessions.write().await = Some(sessions);
+    /// SDP answers / ICE candidates. Synchronous — meant to be called
+    /// once at hub init, BEFORE any supervisor starts. A double-attach
+    /// is a logic bug; we silently ignore the second call (the first
+    /// wins) rather than panic.
+    pub fn attach_webrtc_sessions(&self, sessions: crate::webrtc::SessionRegistry) {
+        let _ = self.webrtc_sessions.set(sessions);
     }
 
     /// Phase 13b: route an inbound WebRtcEvent (forwarded by the
@@ -91,8 +97,7 @@ impl NodeRegistry {
     /// SessionRegistry is attached, matching how `record_capabilities`
     /// silently drops events on tear-down.
     pub async fn record_webrtc_event(&self, event: crate::transport::WebRtcEvent) {
-        let guard = self.webrtc_sessions.read().await;
-        let Some(sessions) = guard.as_ref() else { return };
+        let Some(sessions) = self.webrtc_sessions.get() else { return };
         match event {
             crate::transport::WebRtcEvent::Answer { session_id, sdp } => {
                 // Agent gives us raw SDP; browser expects base64 (the
@@ -755,7 +760,7 @@ mod tests {
         let r = NodeRegistry::new();
         let sessions = crate::webrtc::SessionRegistry::new();
         let id = sessions.create("alpha".into()).await;
-        r.attach_webrtc_sessions(sessions.clone()).await;
+        r.attach_webrtc_sessions(sessions.clone());
 
         let raw_sdp = "v=0\r\no=- 7 1 IN IP4 0.0.0.0\r\nm=video 0 RTP/SAVPF 96\r\n";
         r.record_webrtc_event(crate::transport::WebRtcEvent::Answer {
@@ -780,7 +785,7 @@ mod tests {
         let r = NodeRegistry::new();
         let sessions = crate::webrtc::SessionRegistry::new();
         let id = sessions.create("alpha".into()).await;
-        r.attach_webrtc_sessions(sessions.clone()).await;
+        r.attach_webrtc_sessions(sessions.clone());
 
         let candidate = r#"{"candidate":"candidate:1 1 udp 2113937151 192.168.1.5 53124 typ host","sdpMid":"0","sdpMLineIndex":0}"#;
         r.record_webrtc_event(crate::transport::WebRtcEvent::Ice {
@@ -803,7 +808,7 @@ mod tests {
     async fn webrtc_event_for_unknown_session_is_silent() {
         let r = NodeRegistry::new();
         let sessions = crate::webrtc::SessionRegistry::new();
-        r.attach_webrtc_sessions(sessions.clone()).await;
+        r.attach_webrtc_sessions(sessions.clone());
         // Session never created — record_answer returns false internally
         // and we should NOT panic on the dropped result.
         r.record_webrtc_event(crate::transport::WebRtcEvent::Answer {

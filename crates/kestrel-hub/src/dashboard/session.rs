@@ -142,7 +142,7 @@ pub fn clear_cookie_header() -> String {
 /// header doesn't contain the cookie. We do this manually instead of
 /// pulling in `cookie` or `axum-extra` since we only care about one
 /// cookie name.
-pub fn extract_cookie<'a>(cookie_header: &'a str) -> Option<&'a str> {
+pub fn extract_cookie(cookie_header: &str) -> Option<&str> {
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&format!("{}=", COOKIE_NAME)) {

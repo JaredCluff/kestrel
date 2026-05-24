@@ -8,7 +8,7 @@ use futures::stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::dashboard::templates::{nodes_rows_with_controls, nodes_rows_with_controls_and_world};
+use crate::dashboard::templates::nodes_rows_with_controls_and_world;
 use crate::router::NodeRegistry;
 
 /// Build an SSE stream that emits a `<tbody>` fragment on every
@@ -82,6 +82,7 @@ async fn collect_worlds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::templates::nodes_rows_with_controls;
 
     #[tokio::test]
     async fn render_path_produces_tbody_fragment() {

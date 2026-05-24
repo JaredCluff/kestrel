@@ -245,15 +245,33 @@ async fn execute_step(
     }
     let args_str = step.args.to_string();
     let substituted = substitute(&args_str, captured);
-    let args: serde_json::Value =
-        serde_json::from_str(&substituted).unwrap_or(serde_json::Value::Null);
+    // Substitution failures (typo'd ${step.output}, mismatched braces)
+    // would silently fall back to Null and run the step with empty args
+    // — easy to miss in a multi-step workflow. Surface the parse error
+    // up-front so operators see the typo, not a downstream "missing
+    // required arg" error.
+    let step_started = std::time::Instant::now();
+    let args: serde_json::Value = match serde_json::from_str(&substituted) {
+        Ok(v) => v,
+        Err(e) => {
+            return StepOutcome::Err {
+                error: format!(
+                    "step '{}' args failed to parse after substitution \
+                     (typo in `${{...}}` reference?): {}; substituted text: {}",
+                    step.name, e, substituted
+                ),
+                node_id: None,
+                duration_ms: step_started.elapsed().as_millis() as u64,
+                on_error: step.on_error,
+            };
+        }
+    };
 
     let node_id = match (&step.node, &step.needs) {
         (Some(n), _) => Some(n.clone()),
         (None, Some(needs)) => registry.find_nodes_with(needs).await.into_iter().next(),
         (None, None) => None,
     };
-    let step_started = std::time::Instant::now();
     let Some(node_id) = node_id else {
         return StepOutcome::Err {
             error: format!(
@@ -499,6 +517,48 @@ mod tests {
         let res = run(&reg, vec![], Duration::from_secs(5)).await;
         assert_eq!(res.status, WorkflowStatus::Ok);
         assert!(res.steps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn step_with_malformed_substitution_errors_loudly() {
+        // Regression: previously a JSON parse failure after substitution
+        // was silently swallowed into Value::Null and the step ran with
+        // empty args. The realistic trigger is a previous step's output
+        // containing a `"` that, when interpolated into a JSON string,
+        // closes it early and breaks the surrounding JSON. Without the
+        // explicit error, that became a confusing "missing required arg"
+        // error from a downstream op.
+        let reg = Arc::new(NodeRegistry::new());
+        let mut captured = HashMap::new();
+        // Previous step's output contains a quote — exactly what would
+        // break the JSON when substituted naively into a quoted string.
+        captured.insert("prev.output".into(), r#"oops"break"#.into());
+        let statuses = HashMap::new();
+        let step = WorkflowStep {
+            name: "bad".into(),
+            node: Some("any".into()),
+            needs: None,
+            op: "shell_run".into(),
+            args: serde_json::json!({ "command": "${prev.output}" }),
+            on_error: OnError::Continue,
+            when: None,
+            rollback: None,
+            parallel: false,
+        };
+        let outcome = execute_step(&reg, &step, &captured, &statuses).await;
+        match outcome {
+            StepOutcome::Err { error, .. } => {
+                assert!(
+                    error.contains("failed to parse after substitution"),
+                    "expected substitution parse error, got: {}",
+                    error
+                );
+            }
+            other => panic!(
+                "expected Err outcome from malformed substitution, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
     }
 
     #[tokio::test]

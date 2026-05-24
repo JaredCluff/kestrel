@@ -103,11 +103,18 @@ impl KvmState {
 fn lock_cursor(lock: bool) {
     #[cfg(target_os = "macos")]
     {
+        // CGAssociateMouseAndMouseCursorPosition takes a `boolean_t`,
+        // which is `unsigned int` (4 bytes) on macOS — NOT a 1-byte
+        // C99 _Bool. Passing Rust's `bool` is an ABI mismatch (works
+        // in practice on arm64 since both are passed in a register,
+        // but it's UB per Rust's extern-C rules). Use c_int and pass
+        // 0/1 explicitly.
+        use std::os::raw::c_int;
         #[link(name = "CoreGraphics", kind = "framework")]
         extern "C" {
-            fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
+            fn CGAssociateMouseAndMouseCursorPosition(connected: c_int) -> c_int;
         }
-        unsafe { CGAssociateMouseAndMouseCursorPosition(!lock); }
+        unsafe { CGAssociateMouseAndMouseCursorPosition(if lock { 0 } else { 1 }); }
     }
     #[cfg(not(target_os = "macos"))]
     { let _ = lock; }

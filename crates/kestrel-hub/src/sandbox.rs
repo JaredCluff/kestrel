@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::RwLock;
 
@@ -88,7 +88,7 @@ impl SandboxRegistry {
 
     /// Attach an auto-installer that runs after a backend reports
     /// Ready. The installer derives a per-node PSK from `master_secret`
-    /// + sandbox_id (matches the rest of the hub's PSK derivation),
+    /// and sandbox_id (matches the rest of the hub's PSK derivation),
     /// scps the agent binary in, and ssh-launches it.
     pub fn with_bootstrap(
         mut self,

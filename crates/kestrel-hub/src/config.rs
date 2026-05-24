@@ -483,7 +483,7 @@ listen_dashboard = "0.0.0.0:7273"
 "#;
         let mut doc: toml::Value = toml::from_str(toml).unwrap();
         // Empty-fleet config — try_remove returns Ok(false), not Err.
-        assert_eq!(super::try_remove_node(&mut doc, "anything").unwrap(), false);
+        assert!(!super::try_remove_node(&mut doc, "anything").unwrap());
     }
 
     #[test]
@@ -497,9 +497,9 @@ node_id = "alpha"
 address = "127.0.0.1:7272"
 "#;
         let mut doc: toml::Value = toml::from_str(toml).unwrap();
-        assert_eq!(super::try_remove_node(&mut doc, "alpha").unwrap(), true);
+        assert!(super::try_remove_node(&mut doc, "alpha").unwrap());
         // Removing again — no longer present → Ok(false), not Err.
-        assert_eq!(super::try_remove_node(&mut doc, "alpha").unwrap(), false);
+        assert!(!super::try_remove_node(&mut doc, "alpha").unwrap());
     }
 
     #[test]

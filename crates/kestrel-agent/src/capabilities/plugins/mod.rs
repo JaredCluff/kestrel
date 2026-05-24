@@ -66,6 +66,11 @@ pub struct PluginHandle {
 }
 
 struct PluginIo {
+    // We never read this field, but holding the `Child` is what keeps
+    // the subprocess alive: dropping `child` would close its stdio
+    // pipes and reap the process. Storing it on the long-lived
+    // PluginIo extends the subprocess's lifetime to match the handle.
+    #[allow(dead_code)]
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -147,9 +152,11 @@ async fn request(io: &mut PluginIo, method: &str, params: serde_json::Value) -> 
         anyhow::bail!("plugin closed stdout");
     }
     let response: serde_json::Value = serde_json::from_str(buf.trim())?;
-    // We're lenient about id mismatch — most plugins will echo
-    // correctly; for v1 we just take whatever came back. If this
-    // becomes a real issue we add per-id channels.
+    // Id matching is unnecessary here: the outer `Mutex<PluginIo>`
+    // serializes calls, so the read_line above always returns the
+    // response to OUR write_all. If the call surface ever moves to
+    // pipelined / concurrent requests we'd need per-id correlation;
+    // until then, accepting whatever came back is correct.
     if let Some(err) = response.get("error") {
         anyhow::bail!("plugin error: {}", err);
     }

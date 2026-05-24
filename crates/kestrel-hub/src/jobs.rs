@@ -222,6 +222,10 @@ impl JobRegistry {
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
     }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
 }
 
 fn fresh_job_id() -> JobId {
