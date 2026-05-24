@@ -7,11 +7,27 @@ use crate::config::NodeConfig;
 use crate::router::NodeRegistry;
 use crate::transport;
 
-/// Returns the next reconnect backoff duration for the given attempt number.
-/// 1s → 2s → 4s → 8s → 16s → 30s (cap).
+/// Base reconnect backoff (no jitter), for the given attempt number.
+/// 1s → 2s → 4s → 8s → 16s → 30s (cap). The supervisor wraps this in
+/// [`backoff_with_jitter`] for actual sleeps so a fleet of N agents
+/// reconnecting after a hub restart doesn't hit the listen socket in
+/// lockstep.
 fn backoff_for(attempt: u32) -> Duration {
     let secs = 1u64 << attempt.min(5);
     Duration::from_secs(secs.min(30))
+}
+
+/// Apply ±25% uniform jitter to the base backoff for this attempt.
+/// At attempt=1 (base=1s) sleeps somewhere in 750ms..=1250ms. At the
+/// 30s cap, somewhere in 22.5s..=37.5s. Spreads thundering-herd
+/// reconnects across the window so the hub's accept loop sees a
+/// smoother arrival rate than N-in-one-go.
+fn backoff_with_jitter(attempt: u32) -> Duration {
+    use rand::Rng;
+    let base = backoff_for(attempt).as_millis() as f64;
+    let jitter = rand::thread_rng().gen_range(-0.25f64..=0.25f64);
+    let with_jitter = (base * (1.0 + jitter)).max(50.0); // floor at 50ms
+    Duration::from_millis(with_jitter as u64)
 }
 
 /// Spawn a long-lived supervisor task that keeps a single node connected.
@@ -39,7 +55,10 @@ pub fn spawn(
         loop {
             if attempt > 0 {
                 registry.mark_reconnecting(&node_cfg.node_id, attempt).await;
-                tokio::time::sleep(backoff_for(attempt - 1)).await;
+                // Jittered sleep: ±25% spread prevents lockstep
+                // reconnects after a hub restart from hammering the
+                // accept queue all at once.
+                tokio::time::sleep(backoff_with_jitter(attempt - 1)).await;
             } else {
                 // First-ever attempt — seed status as Reconnecting so the dashboard
                 // sees the node before the first connection succeeds.
@@ -159,5 +178,46 @@ mod tests {
         assert_eq!(backoff_for(5), Duration::from_secs(30));
         assert_eq!(backoff_for(10), Duration::from_secs(30));
         assert_eq!(backoff_for(100), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn jitter_stays_within_25_percent_envelope() {
+        // ±25% means: at base 1000ms, every sample is in [750, 1250].
+        // Loop a healthy number of trials so the bounds get exercised.
+        let base = backoff_for(0).as_millis() as f64;
+        let lo = (base * 0.75) as u128 - 1;
+        let hi = (base * 1.25) as u128 + 1;
+        for _ in 0..500 {
+            let j = backoff_with_jitter(0).as_millis();
+            assert!(
+                j >= lo && j <= hi,
+                "jittered backoff {} ms outside [{}, {}]",
+                j, lo, hi
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_actually_varies() {
+        // Pin that jitter is doing something. If thread_rng ever
+        // returned a fixed seed, a long run of identical values would
+        // mean the jitter is a no-op.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            seen.insert(backoff_with_jitter(2).as_millis());
+        }
+        assert!(seen.len() > 5, "expected diverse jittered values, got only {}", seen.len());
+    }
+
+    #[test]
+    fn jitter_respects_minimum_floor() {
+        // The 50ms floor matters when base is small (attempt 0 base 1s
+        // can jitter down to 750ms, but a future tweak to base=10ms
+        // could go below 50). Exercise the floor by feeding huge
+        // negative jitter via repeated calls — statistical only, but
+        // we assert no sample is < 50ms.
+        for _ in 0..500 {
+            assert!(backoff_with_jitter(0).as_millis() >= 50);
+        }
     }
 }

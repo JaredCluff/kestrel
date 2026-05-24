@@ -1,0 +1,135 @@
+# .github/workflows/ci.yml
+#
+# Continuous-integration matrix for the Kestrel workspace. Runs on
+# every push and PR. Three jobs in parallel:
+#
+#   - check:   `cargo check --workspace --all-targets` (fastest fail)
+#   - clippy:  `cargo clippy --workspace --all-targets -- -D warnings`
+#   - test:    `cargo test --workspace`
+#
+# Matrix covers macOS (arm64) and Linux (x86_64). Windows is left out
+# of CI for now — the workspace builds on Windows but the GitHub-hosted
+# runner image takes long enough that we'd be paying for slow signal
+# on a platform almost nobody tests against day-to-day.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-flight runs when a new push lands on the same PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Don't try to download Cisco's openh264 binary at build time. The
+  # `source` feature compiles the upstream C from the cargo registry
+  # cache — no network needed once `cargo fetch` completes.
+  OPENH264_FROM_SOURCE: "1"
+
+jobs:
+  check:
+    name: cargo check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install platform deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # AT-SPI / X11 / OpenSSL dev headers + nasm for openh264.
+          # rdev needs libxdo / libxtst; xcap needs libxcb.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libatspi2.0-dev \
+            libxdo-dev \
+            libxtst-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            pkg-config \
+            nasm
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache-key: ${{ matrix.os }}-check
+      - run: cargo check --workspace --all-targets
+
+  clippy:
+    name: cargo clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install platform deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libatspi2.0-dev \
+            libxdo-dev \
+            libxtst-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            pkg-config \
+            nasm
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+          cache-key: ${{ matrix.os }}-clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install platform deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libatspi2.0-dev \
+            libxdo-dev \
+            libxtst-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            pkg-config \
+            nasm
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache-key: ${{ matrix.os }}-test
+      - name: Run tests
+        run: cargo test --workspace --no-fail-fast
+
+  # NOTE: A `cargo fmt --check` job is intentionally NOT wired up yet.
+  # The codebase has accumulated some fmt drift that should be cleaned
+  # up in one focused PR before gating CI on it — otherwise the first
+  # CI run blocks every other PR until a massive auto-format lands.
+  # When ready: see commented-out `fmt` job in the git history.

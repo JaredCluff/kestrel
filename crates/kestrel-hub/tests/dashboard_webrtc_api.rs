@@ -131,7 +131,7 @@ async fn post_offer_with_no_agent_connected_returns_202() {
     // browser can poll/timeout, not 5xx.
     let (app, state) = build_app();
     let cookie = cookie_for(&state);
-    let id = state.webrtc_sessions.create("ghost-node".into()).await;
+    let id = state.webrtc_sessions.create("ghost-node".into()).await.unwrap();
 
     let resp = app
         .clone()
@@ -174,7 +174,7 @@ async fn post_ice_to_known_session_without_agent_is_204() {
     // record the candidate. record_ice succeeds → 204 NO_CONTENT.
     let (app, state) = build_app();
     let cookie = cookie_for(&state);
-    let id = state.webrtc_sessions.create("ghost-node".into()).await;
+    let id = state.webrtc_sessions.create("ghost-node".into()).await.unwrap();
     let resp = app
         .oneshot(
             Request::builder()
@@ -200,7 +200,7 @@ async fn post_ice_to_known_session_without_agent_is_204() {
 async fn get_session_returns_full_record() {
     let (app, state) = build_app();
     let cookie = cookie_for(&state);
-    let id = state.webrtc_sessions.create("alpha".into()).await;
+    let id = state.webrtc_sessions.create("alpha".into()).await.unwrap();
     let _ = state.webrtc_sessions.record_offer(&id, "fake-b64".into()).await;
 
     let resp = app

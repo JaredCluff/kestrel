@@ -354,7 +354,12 @@ pub async fn webrtc_create_session(
     axum::Json(body): axum::Json<WebrtcCreateBody>,
 ) -> Result<axum::Json<serde_json::Value>, (StatusCode, String)> {
     check_auth(&state, &headers)?;
-    let id = state.webrtc_sessions.create(body.node_id).await;
+    let Some(id) = state.webrtc_sessions.create(body.node_id).await else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebRTC session cap reached; close an existing session and retry".into(),
+        ));
+    };
     Ok(axum::Json(serde_json::json!({ "session_id": id })))
 }
 

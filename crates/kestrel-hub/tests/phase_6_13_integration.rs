@@ -189,7 +189,7 @@ async fn phase11_policy_decisions_are_consistent() {
 async fn phase13_webrtc_signalling_state_machine() {
     use kestrel_hub::webrtc::{SessionRegistry, SessionStatus};
     let reg = SessionRegistry::new();
-    let id = reg.create("alpha".into()).await;
+    let id = reg.create("alpha".into()).await.unwrap();
     assert_eq!(reg.get(&id).await.unwrap().status, SessionStatus::Created);
     assert!(reg.record_offer(&id, "o".into()).await);
     assert_eq!(reg.get(&id).await.unwrap().status, SessionStatus::OfferReceived);
@@ -233,7 +233,7 @@ async fn phase13b_sdp_round_trip_through_hub_to_agent() {
     });
 
     // Create a hub-side session id and a webrtc-rs browser-side PC.
-    let id = sessions.create("webrtc-node".into()).await;
+    let id = sessions.create("webrtc-node".into()).await.unwrap();
 
     let mut m = MediaEngine::default();
     m.register_default_codecs().unwrap();
@@ -321,7 +321,7 @@ async fn phase13c_agent_ice_candidates_reach_session_registry() {
 
     // Build a browser-side PC; capture its ICE before completing
     // gathering so we have something to send agent-bound too.
-    let id = sessions.create("ice-node".into()).await;
+    let id = sessions.create("ice-node".into()).await.unwrap();
     let mut m = MediaEngine::default();
     m.register_default_codecs().unwrap();
     let api = APIBuilder::new().with_media_engine(m).build();
@@ -409,7 +409,7 @@ async fn phase13c_browser_to_agent_ice_forwarding_does_not_error() {
     // haven't completed an SDP exchange in this leaner test, sending
     // an ICE candidate the agent has no use for must not break the
     // connection.
-    let id = sessions.create("ice2-node".into()).await;
+    let id = sessions.create("ice2-node".into()).await.unwrap();
     handle.send_webrtc_ice(id, cand).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
