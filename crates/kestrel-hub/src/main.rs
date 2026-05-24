@@ -173,6 +173,26 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:7273")]
         hub: String,
     },
+    /// Rotate the hub's master_secret. Generates a fresh 32-byte
+    /// master, replaces the keyring entry, then prints a re-enrollment
+    /// line for every configured node. EVERY agent must be re-enrolled
+    /// after this — old per-node PSKs (HKDF-derived from the old
+    /// master) will no longer authenticate. Destructive; requires
+    /// `--yes`. Without it, prints what would happen and exits.
+    RotateMaster {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+        /// Hub host as it will appear in the printed re-enrollment
+        /// lines. Defaults to 127.0.0.1; pass `--bind <lan-ip>` so the
+        /// printed lines are runnable from the agent machines.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Required to actually perform the rotation. Without it, this
+        /// is a dry run that shows the affected nodes + planned
+        /// enrollment commands.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run pre-flight diagnostics: keyring state, config validity,
     /// dashboard port reachable, configured nodes reachable, sandbox
     /// backend installed. Read-only — safe to run against a live hub.
@@ -596,6 +616,48 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Tui { hub } => {
             kestrel_hub::tui::run(kestrel_hub::tui::TuiArgs { hub_url: hub }).await?;
+        }
+        Command::RotateMaster { config, bind, yes } => {
+            let cfg = kestrel_hub::config::HubConfig::from_file(&config)?;
+            if cfg.nodes.is_empty() {
+                println!(
+                    "No nodes configured in {} — `rotate-master` is a no-op. Use `kestrel-hub init` to start fresh.",
+                    config
+                );
+                return Ok(());
+            }
+            if !yes {
+                println!("`kestrel-hub rotate-master` would:");
+                println!("  1. Generate a fresh 32-byte master_secret");
+                println!("  2. Replace the keyring entry (kestrel, master_secret)");
+                println!("  3. Print a new enrollment line for each of the {} configured node(s):", cfg.nodes.len());
+                for node in &cfg.nodes {
+                    println!("       - {}", node.node_id);
+                }
+                println!();
+                println!("Every agent will need to be re-enrolled with its new line.");
+                println!("Re-run with --yes to perform the rotation.");
+                return Ok(());
+            }
+            // Generate + persist BEFORE printing the lines so a panic
+            // mid-print doesn't leave the keyring out of sync with
+            // the agents the operator is about to update.
+            let new_master = kestrel_hub::enrollment::generate_master_secret();
+            kestrel_hub::enrollment::store_master_secret(&new_master)?;
+            println!("master_secret rotated. Re-enrollment lines (run each on its target machine):");
+            println!();
+            for node in &cfg.nodes {
+                println!(
+                    "  {}",
+                    kestrel_hub::enrollment::enrollment_command(&bind, &node.node_id, &new_master)
+                );
+            }
+            println!();
+            println!(
+                "Until each agent re-enrolls, its connection to the hub will fail \
+                 authentication (expected). Restart the hub after every agent has \
+                 re-enrolled so the supervisors pick up the new master."
+            );
         }
         Command::Doctor { config } => {
             let results = kestrel_hub::doctor::run(&config).await;

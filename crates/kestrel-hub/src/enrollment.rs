@@ -192,6 +192,38 @@ mod tests {
         let b = generate_control_token();
         assert_ne!(a, b);
     }
+
+    #[test]
+    fn rotation_changes_every_node_key() {
+        // Pin the `rotate-master` property: with a fresh master,
+        // EVERY configured node's enrollment line must differ from
+        // the corresponding pre-rotation line. If this ever regressed
+        // (e.g. someone hardcoded a master or skipped HKDF), rotation
+        // would silently fail and "rotated" agents would keep
+        // authenticating against the leaked key.
+        let old_master = b"old-master-32-bytes-padded-test!".to_vec();
+        let new_master = b"new-master-32-bytes-padded-test!".to_vec();
+        let nodes = ["alpha", "beta", "gamma", "delta-special-id"];
+        for node in nodes {
+            let before = enrollment_command("hub", node, &old_master);
+            let after = enrollment_command("hub", node, &new_master);
+            assert_ne!(
+                before, after,
+                "rotation must change node `{}` enrollment line",
+                node
+            );
+            // And the new key must not equal any old key for any node
+            // (per-node distinctness is preserved under rotation).
+            for other in nodes {
+                let other_old = enrollment_command("hub", other, &old_master);
+                assert_ne!(
+                    after, other_old,
+                    "rotated key for `{}` should not match old key for any node (`{}`)",
+                    node, other
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
