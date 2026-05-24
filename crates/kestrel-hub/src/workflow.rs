@@ -511,6 +511,64 @@ mod tests {
         assert_eq!(substitute("echo ${nope.output}", &m), "echo ${nope.output}");
     }
 
+    // ── Property tests ───────────────────────────────────────────────
+
+    proptest::proptest! {
+        /// substitute() with an EMPTY captured map must return the
+        /// input verbatim. No-substitutions is the no-op case.
+        #[test]
+        fn substitute_empty_map_is_identity(input in ".{0,256}") {
+            let m: HashMap<String, String> = HashMap::new();
+            let out = substitute(&input, &m);
+            proptest::prop_assert_eq!(out, input);
+        }
+
+        /// Tokens for keys that exist in the map must be replaced.
+        /// Any leftover instance of the literal `${key}` after
+        /// substitution would indicate the replace logic missed it.
+        #[test]
+        fn substitute_replaces_every_occurrence(
+            key in "[a-zA-Z][a-zA-Z0-9_.]{0,16}",
+            val in ".{0,32}",
+            n in 1usize..5,
+        ) {
+            // Avoid pathological self-substitution: the value must
+            // not itself contain the token, otherwise the property
+            // "no ${key} remains" trivially fails. Reject those cases
+            // with prop_assume.
+            let token = format!("${{{}}}", key);
+            proptest::prop_assume!(!val.contains(&token));
+
+            // Construct an input string with N copies of the token
+            // separated by some arbitrary literal text.
+            let input: String = (0..n).map(|i| format!("a{}{}b", i, &token)).collect();
+            let mut m: HashMap<String, String> = HashMap::new();
+            m.insert(key.clone(), val.clone());
+            let out = substitute(&input, &m);
+            proptest::prop_assert!(
+                !out.contains(&token),
+                "${} still present in {:?}",
+                token,
+                out
+            );
+        }
+
+        /// substitute() must not panic on any (input, captured) pair.
+        /// The whole function is `String::replace` so it shouldn't —
+        /// pin it anyway since this is operator/AI-controlled input.
+        #[test]
+        fn substitute_never_panics(
+            input in ".{0,256}",
+            keys in proptest::collection::vec("[a-z_.]{1,16}", 0..8),
+        ) {
+            let mut m: HashMap<String, String> = HashMap::new();
+            for k in keys {
+                m.insert(k, "xx".into());
+            }
+            let _ = substitute(&input, &m);
+        }
+    }
+
     #[tokio::test]
     async fn empty_workflow_returns_ok() {
         let reg = Arc::new(NodeRegistry::new());
