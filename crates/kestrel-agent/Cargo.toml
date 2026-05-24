@@ -66,3 +66,4 @@ uiautomation = "0.16"
 tokio = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+kestrel-test = { path = "../kestrel-test" }

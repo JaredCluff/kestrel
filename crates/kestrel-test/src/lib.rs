@@ -135,6 +135,42 @@ pub fn cookie_for(state: &AppState) -> String {
     format!("kestrel_session={}", value)
 }
 
+// ── Headless-capability gate ────────────────────────────────────────────────
+
+/// Returns true iff the current host has a display server we can use
+/// for capability tests (clipboard, screen capture, input injection).
+///
+/// On Linux, that's `DISPLAY` being set (Xvfb in CI satisfies this,
+/// as does any real X11 session). On macOS, returns true iff the
+/// caller has set `KESTREL_HEADFUL=1` — macOS tests need real TCC
+/// permission and there's no headless equivalent. On Windows,
+/// returns true iff there's an interactive desktop session.
+///
+/// Capability tests start with `if !has_display() { return; }` so
+/// they're no-ops in environments that can't satisfy them. This is
+/// strictly better than `#[ignore]`: the test code IS exercised in
+/// every build (compile errors caught) but the assertions only fire
+/// when the runtime env supports them.
+pub fn has_display() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("KESTREL_HEADFUL").is_some_and(|v| v == "1")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // No reliable headless detection; assume yes on Windows.
+        true
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
+}
+
 /// A minimal hub `kestrel.toml` suitable for tests. Writes the file
 /// at `dir/kestrel.toml` and returns the path.
 pub fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {

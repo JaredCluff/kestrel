@@ -93,17 +93,25 @@ fn encode_png(img: DynamicImage) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// Runtime-gated test: runs when DISPLAY is set (Linux X11 / Xvfb
+    /// in CI) or KESTREL_HEADFUL=1 on macOS (operator opts in after
+    /// granting TCC). Skips silently otherwise — strictly better than
+    /// `#[ignore]` because the test body still compiles every build.
     #[test]
-    #[ignore = "requires Screen Recording permission (macOS TCC); run manually"]
     fn capture_display_0_returns_valid_png() {
+        if !kestrel_test::has_display() {
+            return;
+        }
         let png = capture_display(0).expect("capture should succeed on a machine with a display");
         assert!(!png.is_empty(), "PNG bytes must not be empty");
         assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47], "bytes must start with PNG magic");
     }
 
     #[test]
-    #[ignore = "requires Screen Recording permission (macOS TCC); run manually"]
     fn list_displays_returns_at_least_one() {
+        if !kestrel_test::has_display() {
+            return;
+        }
         let displays = list_displays();
         assert!(!displays.is_empty(), "must find at least one display");
         let (_, w, h) = displays[0];
