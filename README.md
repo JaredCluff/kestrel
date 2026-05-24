@@ -189,6 +189,25 @@ In another terminal (or another host):
 | `status` | Print loaded config + verify keyring PSK |
 | `unenroll [--yes] [--keep-config]` | Clear PSK from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |
 
+## Fuzzing
+
+Two cargo-fuzz targets at `fuzz/` exercise the wire-facing parsers:
+
+- `bincode_decode` — feeds arbitrary bytes into the KestrelMessage decoder. Asserts no panic on malformed input from a hostile WebSocket peer.
+- `input_event_json` — feeds arbitrary bytes-via-lossy-UTF8 into the InputEvent JSON parser. Asserts no panic on malformed input from a browser tab over the WebRTC data channel.
+
+Both run on demand, not in CI:
+
+```bash
+rustup install nightly
+cargo install cargo-fuzz
+cd fuzz
+cargo +nightly fuzz run bincode_decode        # runs until you Ctrl-C
+cargo +nightly fuzz run input_event_json
+```
+
+Crashes land in `fuzz/artifacts/<target>/`. Add them to a checked-in corpus (`fuzz/corpus/<target>/`) when you want them to live as regression cases — the corpus seeds future fuzz runs, ensuring the fix doesn't regress.
+
 ## Rotation playbook
 
 ### Rotate the master (full-fleet key rotation)

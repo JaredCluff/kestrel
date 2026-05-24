@@ -1,0 +1,8 @@
+# cargo-fuzz emits per-target corpus + artifact directories at the
+# crate root. The corpus grows continuously during fuzz runs and
+# the artifacts (crashing inputs) are local-only — operators commit
+# them separately when they want a regression case to live in tree.
+target
+corpus
+artifacts
+coverage
