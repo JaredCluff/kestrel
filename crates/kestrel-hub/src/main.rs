@@ -173,6 +173,14 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:7273")]
         hub: String,
     },
+    /// Run pre-flight diagnostics: keyring state, config validity,
+    /// dashboard port reachable, configured nodes reachable, sandbox
+    /// backend installed. Read-only — safe to run against a live hub.
+    /// Exits non-zero if any check fails.
+    Doctor {
+        #[arg(long, default_value = "kestrel.toml")]
+        config: String,
+    },
     /// Clear the PSK + control token from the keyring and (optionally) delete kestrel.toml.
     /// Destructive — requires `--yes` to actually take effect.
     Unenroll {
@@ -383,17 +391,44 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => kestrel_hub::sandbox::SandboxRegistry::new(),
             };
+
+            // Graceful shutdown: SIGTERM / SIGINT trips the latch and
+            // every long-running task drains and exits before we
+            // hard-abort. Wired BEFORE serving so we don't miss an
+            // early Ctrl-C.
+            let shutdown = kestrel_hub::shutdown::Shutdown::install();
+            let audit_for_flush = audit.clone();
             let mcp = KestrelMcp::with_audit_and_sandboxes(registry, audit, sandboxes);
             let service = mcp.serve(stdio()).await.inspect_err(|e| {
                 tracing::error!("MCP serve error: {e:?}");
             })?;
-            service.waiting().await?;
+            // Race the MCP service against the shutdown signal so we
+            // exit cleanly on either path (Claude Code disconnects vs.
+            // operator kill).
+            tokio::select! {
+                r = service.waiting() => {
+                    if let Err(e) = r {
+                        tracing::error!("MCP serve ended with error: {}", e);
+                    }
+                }
+                _ = shutdown.wait() => {
+                    println!("Shutdown signal received, draining...");
+                }
+            }
 
-            // Best-effort cleanup — abort supervisors and dashboard when MCP exits.
+            // Drain order matters:
+            //  1. Stop supervisors so no new tool calls land mid-drain.
+            //  2. Abort the dashboard so no new HTTP requests start.
+            //  3. fsync the audit log so the last lines survive.
+            // In-flight audit_call invocations are bounded by tool-call
+            // duration (often <1s); we don't explicitly wait for them
+            // since aborting their supervisors will end them quickly.
             for (_, h) in state.supervisors.write().await.drain() {
                 h.abort();
             }
             dashboard_handle.abort();
+            audit_for_flush.flush().await;
+            println!("Hub shutdown complete.");
         }
         Command::AddNode { node_id, address, config, hub } => {
             // Validate the address once up front so we get a clean error before any I/O.
@@ -561,6 +596,13 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Tui { hub } => {
             kestrel_hub::tui::run(kestrel_hub::tui::TuiArgs { hub_url: hub }).await?;
+        }
+        Command::Doctor { config } => {
+            let results = kestrel_hub::doctor::run(&config).await;
+            print!("{}", kestrel_hub::doctor::format_report(&results));
+            if !kestrel_hub::doctor::ok(&results) {
+                std::process::exit(1);
+            }
         }
         Command::Unenroll { config, keep_config, yes } => {
             let will_delete_config = !keep_config && std::path::Path::new(&config).exists();

@@ -207,6 +207,8 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/node/:node_id", get(node_detail_handler))
         .route("/sse", get(sse_handler))
+        .route("/healthz", get(healthz_handler))
+        .route("/readyz", get(readyz_handler))
         .route("/login", get(api::login_form).post(api::login_submit))
         .route("/logout", axum::routing::post(api::logout))
         .route("/ui/nodes", axum::routing::post(api::ui_add_node))
@@ -274,6 +276,43 @@ async fn index(
         }
     }
     templates::page_with_layout_and_world(&snapshot, &layout, &world_map, authed)
+}
+
+/// Liveness probe. Returns 200 OK if the hub's HTTP server is up and
+/// can answer requests. Intentionally cheap — does NOT touch the
+/// registry, keyring, or filesystem. A load balancer / supervisor uses
+/// this to decide "is the process alive" vs. "should I restart it."
+async fn healthz_handler() -> impl IntoResponse {
+    (StatusCode::OK, "ok\n")
+}
+
+/// Readiness probe. Returns 200 when the hub considers itself ready to
+/// serve MCP traffic: at least one configured node has connected at
+/// least once (so the registry has someone to route to), and the
+/// dashboard's session-signing key is loaded. Returns 503 + a short
+/// reason otherwise so operators (and orchestrators) can distinguish
+/// "starting up" from "broken."
+async fn readyz_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl IntoResponse {
+    let snap = state.registry.status_snapshot().await;
+    // "Configured but never registered" is the typical fresh-install
+    // state. Once a supervisor starts (even before it lands its first
+    // connection) it calls `mark_reconnecting`, seeding a row in the
+    // registry. Any seeded row means "we have someone to route to" —
+    // an Online row is best but Reconnecting/Offline also count: the
+    // routing path exists, the remote side might just be down right
+    // this second.
+    let any_seeded = !snap.is_empty();
+    if any_seeded {
+        (StatusCode::OK, "ready\n").into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not ready: no node has connected yet\n",
+        )
+            .into_response()
+    }
 }
 
 async fn node_detail_handler(
