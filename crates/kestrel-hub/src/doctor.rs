@@ -32,7 +32,13 @@ impl Verdict {
 
 #[derive(Debug, Clone)]
 pub struct CheckResult {
-    pub name: &'static str,
+    /// Display name for the check. `String` (not `&'static str`)
+    /// because per-node checks need to interpolate the node_id, and
+    /// owning the name is simpler than wrangling a Cow or
+    /// Box::leak'ing once per check. The cost (one short heap alloc
+    /// per check) is negligible compared to the network I/O the
+    /// checks themselves do.
+    pub name: String,
     pub verdict: Verdict,
     pub detail: String,
 }
@@ -47,7 +53,7 @@ pub async fn run(config_path: &str) -> Vec<CheckResult> {
     let cfg = match crate::config::HubConfig::from_file(config_path) {
         Ok(c) => {
             out.push(CheckResult {
-                name: "hub config",
+                name: "hub config".into(),
                 verdict: Verdict::Pass,
                 detail: format!("parsed {}", config_path),
             });
@@ -55,7 +61,7 @@ pub async fn run(config_path: &str) -> Vec<CheckResult> {
         }
         Err(e) => {
             out.push(CheckResult {
-                name: "hub config",
+                name: "hub config".into(),
                 verdict: Verdict::Fail,
                 detail: format!("could not parse {}: {}", config_path, e),
             });
@@ -73,12 +79,12 @@ pub async fn run(config_path: &str) -> Vec<CheckResult> {
 fn check_master_secret() -> CheckResult {
     match crate::enrollment::load_master_secret() {
         Ok(s) if s.len() == 32 => CheckResult {
-            name: "master_secret in keyring",
+            name: "master_secret in keyring".into(),
             verdict: Verdict::Pass,
             detail: "present, 32 bytes".into(),
         },
         Ok(s) => CheckResult {
-            name: "master_secret in keyring",
+            name: "master_secret in keyring".into(),
             verdict: Verdict::Warn,
             detail: format!(
                 "present but {} bytes (expected 32) — re-run `kestrel-hub init`",
@@ -86,7 +92,7 @@ fn check_master_secret() -> CheckResult {
             ),
         },
         Err(e) => CheckResult {
-            name: "master_secret in keyring",
+            name: "master_secret in keyring".into(),
             verdict: Verdict::Fail,
             detail: format!("not found: {} — run `kestrel-hub init`", e),
         },
@@ -96,17 +102,17 @@ fn check_master_secret() -> CheckResult {
 fn check_control_token() -> CheckResult {
     match crate::enrollment::load_control_token() {
         Ok(t) if !t.is_empty() => CheckResult {
-            name: "control_token in keyring",
+            name: "control_token in keyring".into(),
             verdict: Verdict::Pass,
             detail: "present".into(),
         },
         Ok(_) => CheckResult {
-            name: "control_token in keyring",
+            name: "control_token in keyring".into(),
             verdict: Verdict::Warn,
             detail: "present but empty — dashboard mutations will reject".into(),
         },
         Err(e) => CheckResult {
-            name: "control_token in keyring",
+            name: "control_token in keyring".into(),
             verdict: Verdict::Warn,
             detail: format!(
                 "not found: {} — POST/DELETE on /api/nodes will be open (legacy mode)",
@@ -124,18 +130,18 @@ async fn check_dashboard_port(addr: std::net::SocketAddr) -> CheckResult {
     // expected steady state once `kestrel-hub start` is up).
     match tokio::net::TcpListener::bind(addr).await {
         Ok(_listener) => CheckResult {
-            name: "dashboard port",
+            name: "dashboard port".into(),
             verdict: Verdict::Pass,
             detail: format!("{} bindable (hub not running, or stopped)", addr),
         },
         Err(_) => match tokio::net::TcpStream::connect(addr).await {
             Ok(_) => CheckResult {
-                name: "dashboard port",
+                name: "dashboard port".into(),
                 verdict: Verdict::Pass,
                 detail: format!("{} in use (hub appears running)", addr),
             },
             Err(e) => CheckResult {
-                name: "dashboard port",
+                name: "dashboard port".into(),
                 verdict: Verdict::Fail,
                 detail: format!(
                     "{} neither bindable nor connectable: {} (firewall? perm denied?)",
@@ -149,7 +155,7 @@ async fn check_dashboard_port(addr: std::net::SocketAddr) -> CheckResult {
 async fn check_nodes_reachable(cfg: &crate::config::HubConfig) -> Vec<CheckResult> {
     if cfg.nodes.is_empty() {
         return vec![CheckResult {
-            name: "configured nodes",
+            name: "configured nodes".into(),
             verdict: Verdict::Warn,
             detail: "no nodes configured — run `kestrel-hub add-node <id> <addr>`".into(),
         }];
@@ -172,12 +178,8 @@ async fn check_nodes_reachable(cfg: &crate::config::HubConfig) -> Vec<CheckResul
                 format!("{} connect timeout after 2s", node.address),
             ),
         };
-        // Static-string `name` requires Box::leak when built from
-        // owned String; doctor results are small + short-lived so the
-        // leak is bounded by one invocation.
-        let leaked: &'static str = Box::leak(format!("node {}", node.node_id).into_boxed_str());
         out.push(CheckResult {
-            name: leaked,
+            name: format!("node {}", node.node_id),
             verdict,
             detail,
         });
@@ -199,7 +201,7 @@ fn check_sandbox_backend(
         "powershell"
     } else {
         return CheckResult {
-            name: "sandbox backend",
+            name: "sandbox backend".into(),
             verdict: Verdict::Warn,
             detail: "no supported backend on this OS".into(),
         };
@@ -207,7 +209,7 @@ fn check_sandbox_backend(
     let on_path = which(backend).is_some();
     if !on_path {
         return CheckResult {
-            name: "sandbox backend",
+            name: "sandbox backend".into(),
             verdict: Verdict::Warn,
             detail: format!(
                 "{} not on PATH — `sandbox_spawn` will fail until installed",
@@ -218,7 +220,7 @@ fn check_sandbox_backend(
     if let Some(b) = bootstrap {
         if !b.agent_binary.exists() {
             return CheckResult {
-                name: "sandbox backend",
+                name: "sandbox backend".into(),
                 verdict: Verdict::Fail,
                 detail: format!(
                     "{} found but sandbox.bootstrap.agent_binary missing: {}",
@@ -229,7 +231,7 @@ fn check_sandbox_backend(
         }
         if !b.ssh_key.exists() {
             return CheckResult {
-                name: "sandbox backend",
+                name: "sandbox backend".into(),
                 verdict: Verdict::Fail,
                 detail: format!(
                     "{} found but sandbox.bootstrap.ssh_key missing: {}",
@@ -240,7 +242,7 @@ fn check_sandbox_backend(
         }
     }
     CheckResult {
-        name: "sandbox backend",
+        name: "sandbox backend".into(),
         verdict: Verdict::Pass,
         detail: format!("{} on PATH", backend),
     }
@@ -310,8 +312,8 @@ mod tests {
     #[test]
     fn ok_returns_true_when_no_fail() {
         let r = vec![
-            CheckResult { name: "a", verdict: Verdict::Pass, detail: "".into() },
-            CheckResult { name: "b", verdict: Verdict::Warn, detail: "".into() },
+            CheckResult { name: "a".into(), verdict: Verdict::Pass, detail: "".into() },
+            CheckResult { name: "b".into(), verdict: Verdict::Warn, detail: "".into() },
         ];
         assert!(ok(&r));
     }
@@ -319,8 +321,8 @@ mod tests {
     #[test]
     fn ok_returns_false_when_any_fail() {
         let r = vec![
-            CheckResult { name: "a", verdict: Verdict::Pass, detail: "".into() },
-            CheckResult { name: "b", verdict: Verdict::Fail, detail: "".into() },
+            CheckResult { name: "a".into(), verdict: Verdict::Pass, detail: "".into() },
+            CheckResult { name: "b".into(), verdict: Verdict::Fail, detail: "".into() },
         ];
         assert!(!ok(&r));
     }
@@ -328,9 +330,9 @@ mod tests {
     #[test]
     fn format_report_shows_summary() {
         let r = vec![
-            CheckResult { name: "a", verdict: Verdict::Pass, detail: "ok".into() },
-            CheckResult { name: "b", verdict: Verdict::Warn, detail: "huh".into() },
-            CheckResult { name: "c", verdict: Verdict::Fail, detail: "no".into() },
+            CheckResult { name: "a".into(), verdict: Verdict::Pass, detail: "ok".into() },
+            CheckResult { name: "b".into(), verdict: Verdict::Warn, detail: "huh".into() },
+            CheckResult { name: "c".into(), verdict: Verdict::Fail, detail: "no".into() },
         ];
         let s = format_report(&r);
         assert!(s.contains("1 pass"));

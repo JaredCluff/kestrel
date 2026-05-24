@@ -109,8 +109,13 @@ async fn phase6_world_update_flows_through_supervisor_path() {
         }
     });
 
-    // Wait up to 5s for the first observation to land.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Wait up to 10s for the first observation to land. 10s leaves
+    // generous headroom over the WorldObserver's 2s tick when many
+    // test binaries are running in parallel and the host's CPU is
+    // contended — we've had to bump similarly-shaped deadlines in
+    // phase5_reconnect and per_node_psk_rejection for the same
+    // reason.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut got = false;
     while std::time::Instant::now() < deadline {
         if reg.world_state_for("world-node").await.is_some() {
