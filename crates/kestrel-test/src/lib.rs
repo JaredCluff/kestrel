@@ -162,8 +162,11 @@ pub fn has_display() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        // No reliable headless detection; assume yes on Windows.
-        true
+        // CI runners are headless; the Win32 clipboard/input APIs can
+        // succeed without an interactive session sometimes but the
+        // results are non-deterministic. Require explicit opt-in
+        // (mirrors macOS's KESTREL_HEADFUL gate).
+        std::env::var_os("KESTREL_HEADFUL").is_some_and(|v| v == "1")
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {

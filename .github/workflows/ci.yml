@@ -37,10 +37,14 @@ jobs:
   check:
     name: cargo check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Windows is experimental — soft-fail so it doesn't block PRs
+    # while we shake out platform-specific issues. Once it passes
+    # consistently on a few PRs in a row, remove this conditional.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install platform deps (Linux)
@@ -60,19 +64,32 @@ jobs:
             libssl-dev \
             pkg-config \
             nasm
+      - name: Install platform deps (Windows)
+        if: runner.os == 'Windows'
+        # nasm for openh264. windows-latest GH runners have
+        # Chocolatey preinstalled. The openh264 build script also
+        # invokes cl.exe via cc-rs, which uses MSVC from the
+        # actions/checkout image — no extra setup needed.
+        run: choco install nasm -y
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           cache-key: ${{ matrix.os }}-check
+      - name: Add nasm to PATH (Windows)
+        if: runner.os == 'Windows'
+        # choco installs nasm under C:\Program Files\NASM; append it
+        # to GITHUB_PATH so subsequent steps see the binary.
+        run: echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - run: cargo check --workspace --all-targets
 
   clippy:
     name: cargo clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install platform deps (Linux)
@@ -90,20 +107,27 @@ jobs:
             libssl-dev \
             pkg-config \
             nasm
+      - name: Install platform deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nasm -y
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           components: clippy
           cache-key: ${{ matrix.os }}-clippy
+      - name: Add nasm to PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install platform deps (Linux)
@@ -128,10 +152,16 @@ jobs:
             nasm \
             xvfb \
             xauth
+      - name: Install platform deps (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nasm -y
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           cache-key: ${{ matrix.os }}-test
+      - name: Add nasm to PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Run tests (Linux, under Xvfb)
         if: runner.os == 'Linux'
         # xvfb-run wraps the command so $DISPLAY is set for its
@@ -146,6 +176,12 @@ jobs:
         # macOS capability tests stay skipped by default (TCC needs a
         # real interactive grant); operators opt in by setting
         # KESTREL_HEADFUL=1 on their dev box.
+        run: cargo test --workspace --no-fail-fast
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        # No virtual display equivalent in CI. Tests gated by
+        # has_display() return early on Windows by default — the
+        # rest of the suite runs unconditionally.
         run: cargo test --workspace --no-fail-fast
 
   coverage:
