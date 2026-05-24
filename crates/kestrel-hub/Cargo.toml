@@ -55,3 +55,4 @@ tokio         = { workspace = true, features = ["test-util"] }
 tempfile      = { workspace = true }
 tower         = { workspace = true, features = ["util"] }
 rcgen         = "0.11"
+proptest      = { workspace = true }
