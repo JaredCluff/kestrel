@@ -38,78 +38,102 @@ pub struct EncodedFrame {
 /// Transient `capture_image` errors are logged + skipped — a single
 /// failed frame shouldn't kill the stream.
 pub fn spawn(display_index: usize, target_fps: u32) -> mpsc::Receiver<EncodedFrame> {
+    let monitors = match xcap::Monitor::all() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("screen_stream: Monitor::all failed: {}", e);
+            return mpsc::channel::<EncodedFrame>(1).1;
+        }
+    };
+    let Some(mon) = monitors.into_iter().nth(display_index) else {
+        tracing::warn!(
+            "screen_stream: display index {} not present",
+            display_index
+        );
+        return mpsc::channel::<EncodedFrame>(1).1;
+    };
+    let width = match mon.width() {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("screen_stream: monitor.width: {}", e);
+            return mpsc::channel::<EncodedFrame>(1).1;
+        }
+    };
+    let height = match mon.height() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("screen_stream: monitor.height: {}", e);
+            return mpsc::channel::<EncodedFrame>(1).1;
+        }
+    };
+    // Encoders require even dimensions; round down if the OS gives
+    // us an odd value (some scaled HiDPI configs do this).
+    let enc_w = (width & !1) as usize;
+    let enc_h = (height & !1) as usize;
+
+    // Hand the xcap capture into the testable `spawn_with_source` path.
+    // The closure handles the RGBA→BGRA swap + HiDPI-crop here so the
+    // inner loop only sees ready-to-encode frames.
+    spawn_with_source(enc_w as u32, enc_h as u32, target_fps, move || {
+        let img = mon
+            .capture_image()
+            .map_err(|e| anyhow::anyhow!("xcap capture: {}", e))?;
+        let (img_w, img_h) = (img.width() as usize, img.height() as usize);
+        let mut bgra = img.into_raw();
+        for px in bgra.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        let out = if img_w != enc_w || img_h != enc_h {
+            crop_bgra(&bgra, img_w, img_h, enc_w, enc_h)
+        } else {
+            bgra
+        };
+        Ok(out)
+    })
+}
+
+/// Test-friendly entry point: drive the encode loop with an arbitrary
+/// frame source. The closure is called once per tick and returns a
+/// `Vec<u8>` of BGRA bytes sized exactly `width * height * 4`. Anything
+/// else is logged and skipped (matching the runtime behavior for
+/// transient capture failures).
+///
+/// Returning `Err` is treated the same as a capture failure — logged
+/// and the loop sleeps one interval before retrying. Returning a
+/// sentinel `Err` with message "stop" tells the loop to exit cleanly,
+/// which test code uses to terminate finite-frame scenarios.
+pub fn spawn_with_source<F>(
+    width: u32,
+    height: u32,
+    target_fps: u32,
+    mut capture: F,
+) -> mpsc::Receiver<EncodedFrame>
+where
+    F: FnMut() -> anyhow::Result<Vec<u8>> + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<EncodedFrame>(8);
     let interval = Duration::from_micros(1_000_000 / target_fps.max(1) as u64);
     std::thread::spawn(move || {
-        let monitors = match xcap::Monitor::all() {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("screen_stream: Monitor::all failed: {}", e);
-                return;
-            }
-        };
-        let Some(mon) = monitors.into_iter().nth(display_index) else {
-            tracing::warn!(
-                "screen_stream: display index {} not present",
-                display_index
-            );
-            return;
-        };
-        let width = match mon.width() {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!("screen_stream: monitor.width: {}", e);
-                return;
-            }
-        };
-        let height = match mon.height() {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!("screen_stream: monitor.height: {}", e);
-                return;
-            }
-        };
-        // Encoders require even dimensions; round down if the OS gives
-        // us an odd value (some scaled HiDPI configs do this).
-        let enc_w = width & !1;
-        let enc_h = height & !1;
-        let mut encoder = match H264Encoder::new(enc_w, enc_h, target_fps) {
+        let mut encoder = match H264Encoder::new(width, height, target_fps) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("screen_stream: encoder init: {}", e);
                 return;
             }
         };
-
         let started = Instant::now();
         loop {
             let frame_start = Instant::now();
-            let img = match mon.capture_image() {
-                Ok(i) => i,
+            let bgra = match capture() {
+                Ok(b) => b,
+                Err(e) if e.to_string() == "stop" => break,
                 Err(e) => {
-                    tracing::warn!("screen_stream: capture_image: {}", e);
+                    tracing::warn!("screen_stream: capture: {}", e);
                     std::thread::sleep(interval);
                     continue;
                 }
             };
-
-            let (img_w, img_h) = (img.width() as usize, img.height() as usize);
-            let mut bgra = img.into_raw();
-            // xcap returns RGBA; we need BGRA for the encoder's BT.601
-            // path. swap R and B in-place.
-            for px in bgra.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-            // If the image came back larger than the encoder dims
-            // (HiDPI quirk: width()/height() lie about logical vs
-            // physical pixels), crop to the encoder's view.
-            let cropped = if img_w as u32 != enc_w || img_h as u32 != enc_h {
-                crop_bgra(&bgra, img_w, img_h, enc_w as usize, enc_h as usize)
-            } else {
-                bgra
-            };
-
-            let bytes = match encoder.encode_bgra(&cropped) {
+            let bytes = match encoder.encode_bgra(&bgra) {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::warn!("screen_stream: encode_bgra: {}", e);
@@ -121,7 +145,6 @@ pub fn spawn(display_index: usize, target_fps: u32) -> mpsc::Receiver<EncodedFra
                 .blocking_send(EncodedFrame { bytes, pts_ms })
                 .is_err()
             {
-                // Receiver dropped — wind down.
                 break;
             }
             let elapsed = frame_start.elapsed();
@@ -202,5 +225,84 @@ mod tests {
         let rx = spawn(0, 30);
         drop(rx);
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn synthetic_source_drives_full_encode_loop() {
+        // Inject a synthetic frame source so we exercise the entire
+        // encode loop body in CI without xcap / a display.
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter_for_source = counter.clone();
+        let mut rx = spawn_with_source(64, 48, 60, move || {
+            let i = counter_for_source.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if i >= 5 {
+                return Err(anyhow::anyhow!("stop"));
+            }
+            let mut bgra = vec![0u8; 64 * 48 * 4];
+            // Animate so each frame differs (encoder produces real
+            // delta frames instead of optimizing them all to zero).
+            for px in bgra.chunks_exact_mut(4) {
+                px[1] = (i * 40) as u8;
+                px[3] = 255;
+            }
+            Ok(bgra)
+        });
+        let mut received = 0;
+        while let Some(f) = rx.recv().await {
+            assert!(!f.bytes.is_empty(), "frame {} was empty", received);
+            // PTS must be monotonically non-decreasing.
+            received += 1;
+            if received >= 5 {
+                break;
+            }
+        }
+        assert_eq!(received, 5, "expected 5 encoded frames");
+    }
+
+    #[tokio::test]
+    async fn capture_errors_dont_kill_the_loop() {
+        // Three failing captures, then one success, then stop.
+        // Verifies that transient capture errors don't terminate
+        // the stream — only the explicit "stop" sentinel does.
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter_for_source = counter.clone();
+        let mut rx = spawn_with_source(64, 48, 240, move || {
+            let i = counter_for_source.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if i < 3 {
+                Err(anyhow::anyhow!("transient capture failure"))
+            } else if i == 3 {
+                Ok(vec![100u8; 64 * 48 * 4])
+            } else {
+                Err(anyhow::anyhow!("stop"))
+            }
+        });
+        let f = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for the successful frame")
+            .expect("channel closed before success");
+        assert!(!f.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn synthetic_source_pts_is_monotonic_nondecreasing() {
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter_for_source = counter.clone();
+        let mut rx = spawn_with_source(64, 48, 60, move || {
+            let i = counter_for_source.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if i >= 4 {
+                return Err(anyhow::anyhow!("stop"));
+            }
+            Ok(vec![(i * 30) as u8; 64 * 48 * 4])
+        });
+        let mut prev_pts = 0u64;
+        while let Some(f) = rx.recv().await {
+            assert!(
+                f.pts_ms >= prev_pts,
+                "pts went backwards: {} -> {}",
+                prev_pts,
+                f.pts_ms
+            );
+            prev_pts = f.pts_ms;
+        }
     }
 }

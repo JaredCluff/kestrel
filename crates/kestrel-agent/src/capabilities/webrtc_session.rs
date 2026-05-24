@@ -265,6 +265,52 @@ pub fn key_from_dom_code(code: &str) -> Option<kestrel_proto::KeyCode> {
     })
 }
 
+/// Sink type for input events arriving over the WebRTC data channel.
+/// `dispatch_input` wraps the production sink; tests inject their own
+/// to observe events without driving real input injection. Must be
+/// Sync + Clone so it can be moved into both the on_data_channel and
+/// the per-message handler.
+pub type InputSink = std::sync::Arc<
+    dyn Fn(InputEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Register an `on_data_channel` handler on `pc` that decodes JSON
+/// InputEvents off every inbound message and feeds them into `sink`.
+/// Parse failures are logged and dropped (defensive against a misbehaving
+/// or older browser sending unknown shapes).
+pub fn wire_input_channel<F, Fut>(pc: &RTCPeerConnection, sink: F)
+where
+    F: Fn(InputEvent) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let sink: InputSink = std::sync::Arc::new(move |e| {
+        let fut = sink(e);
+        Box::pin(fut)
+    });
+    let sink_for_dc = sink.clone();
+    pc.on_data_channel(Box::new(move |dc| {
+        let sink_for_msg = sink_for_dc.clone();
+        Box::pin(async move {
+            dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                let sink = sink_for_msg.clone();
+                let payload = String::from_utf8_lossy(&msg.data).to_string();
+                Box::pin(async move {
+                    let event: InputEvent = match serde_json::from_str(&payload) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::debug!("webrtc input: parse failed: {} ({})", e, payload);
+                            return;
+                        }
+                    };
+                    (sink)(event).await;
+                })
+            }));
+        })
+    }));
+}
+
 /// Handle a `Payload::WebRtcOffer` arriving from the hub. Boots a
 /// screen capture stream, wires it through a new `WebRtcSession`,
 /// completes the SDP answer half of the negotiation, and registers an
@@ -288,27 +334,14 @@ pub async fn handle_offer(
     // "input" channel inside its offer (negotiated by SDP); this
     // handler fires on every inbound message regardless of channel
     // label so we don't have to plumb a separate channel-id config.
-    let pc = session.pc.clone();
     let (input_w, input_h) = primary_display_dims();
-    pc.on_data_channel(Box::new(move |dc| {
+    wire_input_channel(&session.pc, move |event| {
         Box::pin(async move {
-            dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                let payload = String::from_utf8_lossy(&msg.data).to_string();
-                Box::pin(async move {
-                    let event: InputEvent = match serde_json::from_str(&payload) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            tracing::debug!("webrtc input: parse failed: {} ({})", e, payload);
-                            return;
-                        }
-                    };
-                    if let Err(e) = dispatch_input(event, input_w, input_h).await {
-                        tracing::warn!("webrtc input dispatch: {}", e);
-                    }
-                })
-            }));
+            if let Err(e) = dispatch_input(event, input_w, input_h).await {
+                tracing::warn!("webrtc input dispatch: {}", e);
+            }
         })
-    }));
+    });
 
     let pc = session.pc.clone();
     let event_tx_for_ice = event_tx.clone();
@@ -476,6 +509,155 @@ mod tests {
     fn input_event_json_rejects_unknown_kind() {
         let bad = serde_json::from_str::<InputEvent>(r#"{"kind":"sneeze"}"#);
         assert!(bad.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn data_channel_input_event_reaches_sink_via_loopback() {
+        // End-to-end test of the input data channel. Two real
+        // webrtc-rs PCs negotiate SDP+ICE in-process; A opens an
+        // "input" channel and sends a JSON InputEvent over it; B has
+        // wire_input_channel attached to a sink that pushes received
+        // events onto an mpsc. We assert the event arrives intact.
+        //
+        // This exercises: handle_offer's on_data_channel wiring (via
+        // wire_input_channel), on_message decoding, and the test path
+        // confirms the agent's data-channel surface actually works
+        // when peered with a real browser-shaped PC.
+
+        let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<InputEvent>(8);
+        let sink_tx_for_sink = sink_tx.clone();
+
+        // Build B first and attach the sink BEFORE we run the SDP
+        // exchange — on_data_channel must be registered before the
+        // remote offer arrives.
+        let b = build_peer_connection().await.unwrap();
+        wire_input_channel(&b, move |event| {
+            let tx = sink_tx_for_sink.clone();
+            async move {
+                let _ = tx.send(event).await;
+            }
+        });
+
+        // A is the browser side: creates data channel + offer.
+        let a = build_peer_connection().await.unwrap();
+        let channel = a.create_data_channel("input", None).await.unwrap();
+
+        let offer = a.create_offer(None).await.unwrap();
+        let mut gather_a = a.gathering_complete_promise().await;
+        a.set_local_description(offer).await.unwrap();
+        let _ = gather_a.recv().await;
+        let offer_with_ice = a.local_description().await.unwrap();
+
+        b.set_remote_description(offer_with_ice).await.unwrap();
+        let answer = b.create_answer(None).await.unwrap();
+        let mut gather_b = b.gathering_complete_promise().await;
+        b.set_local_description(answer).await.unwrap();
+        let _ = gather_b.recv().await;
+        let answer_with_ice = b.local_description().await.unwrap();
+        a.set_remote_description(answer_with_ice).await.unwrap();
+
+        // Wait for the data channel to open (loopback over real ICE
+        // takes a beat). Up to ~15s.
+        let (open_tx, mut open_rx) = tokio::sync::mpsc::channel::<()>(1);
+        channel.on_open(Box::new(move || {
+            let tx = open_tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(()).await;
+            })
+        }));
+        tokio::time::timeout(Duration::from_secs(15), open_rx.recv())
+            .await
+            .expect("data channel never opened")
+            .expect("open notifier dropped");
+
+        // Send a KEY event and a MOUSE event; assert both arrive in
+        // the agent's sink.
+        let key = r#"{"kind":"key","code":"KeyZ","modifiers":{"ctrl":true},"action":"press"}"#;
+        channel.send_text(key.to_string()).await.unwrap();
+        let mouse = r#"{"kind":"mouse_move","x":0.42,"y":0.61}"#;
+        channel.send_text(mouse.to_string()).await.unwrap();
+
+        // Receive both with a generous timeout.
+        let first = tokio::time::timeout(Duration::from_secs(5), sink_rx.recv())
+            .await
+            .expect("never got first input event")
+            .expect("sink dropped");
+        let second = tokio::time::timeout(Duration::from_secs(5), sink_rx.recv())
+            .await
+            .expect("never got second input event")
+            .expect("sink dropped");
+
+        // Order of arrival is preserved over a single data channel.
+        match first {
+            InputEvent::Key { code, modifiers, action: Action::Press } => {
+                assert_eq!(code, "KeyZ");
+                assert!(modifiers.ctrl);
+            }
+            other => panic!("expected Key event first, got {:?}", other),
+        }
+        match second {
+            InputEvent::MouseMove { x, y } => {
+                assert!((x - 0.42).abs() < 1e-9);
+                assert!((y - 0.61).abs() < 1e-9);
+            }
+            other => panic!("expected MouseMove event second, got {:?}", other),
+        }
+
+        a.close().await.unwrap();
+        b.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn data_channel_swallows_malformed_json_silently() {
+        // A non-parsing message must NOT panic and must NOT close the
+        // channel — the next valid message should still arrive.
+        let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<InputEvent>(8);
+        let sink_tx_for_sink = sink_tx.clone();
+        let b = build_peer_connection().await.unwrap();
+        wire_input_channel(&b, move |event| {
+            let tx = sink_tx_for_sink.clone();
+            async move { let _ = tx.send(event).await; }
+        });
+
+        let a = build_peer_connection().await.unwrap();
+        let channel = a.create_data_channel("input", None).await.unwrap();
+        let offer = a.create_offer(None).await.unwrap();
+        let mut gather_a = a.gathering_complete_promise().await;
+        a.set_local_description(offer).await.unwrap();
+        let _ = gather_a.recv().await;
+        let offer_with_ice = a.local_description().await.unwrap();
+        b.set_remote_description(offer_with_ice).await.unwrap();
+        let answer = b.create_answer(None).await.unwrap();
+        let mut gather_b = b.gathering_complete_promise().await;
+        b.set_local_description(answer).await.unwrap();
+        let _ = gather_b.recv().await;
+        a.set_remote_description(b.local_description().await.unwrap()).await.unwrap();
+
+        let (open_tx, mut open_rx) = tokio::sync::mpsc::channel::<()>(1);
+        channel.on_open(Box::new(move || {
+            let tx = open_tx.clone();
+            Box::pin(async move { let _ = tx.send(()).await; })
+        }));
+        tokio::time::timeout(Duration::from_secs(15), open_rx.recv())
+            .await
+            .expect("data channel never opened")
+            .expect("open notifier dropped");
+
+        // Send garbage, then a valid event.
+        channel.send_text("not json at all".to_string()).await.unwrap();
+        channel.send_text("{}".to_string()).await.unwrap(); // valid JSON, missing tag
+        channel.send_text(r#"{"kind":"text","text":"hello"}"#.to_string()).await.unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), sink_rx.recv())
+            .await
+            .expect("never got the valid event")
+            .expect("sink dropped");
+        match event {
+            InputEvent::Text { text } => assert_eq!(text, "hello"),
+            other => panic!("expected Text event, got {:?}", other),
+        }
+        a.close().await.unwrap();
+        b.close().await.unwrap();
     }
 
     #[tokio::test]

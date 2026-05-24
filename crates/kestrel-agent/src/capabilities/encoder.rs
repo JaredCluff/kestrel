@@ -207,4 +207,84 @@ mod tests {
         let too_small = vec![0u8; 10];
         assert!(enc.encode_bgra(&too_small).is_err());
     }
+
+    #[test]
+    fn encoder_handles_realistic_720p_frame() {
+        // 1280x720 is a common screen-sharing target; this is the
+        // largest size we exercise in CI. Real screens go to 4K but
+        // testing that in CI would be very slow.
+        let mut enc = H264Encoder::new(1280, 720, 30).unwrap();
+        let bgra = vec![64u8; 1280 * 720 * 4];
+        let frame = enc.encode_bgra(&bgra).unwrap();
+        assert!(!frame.is_empty(), "720p frame must encode");
+    }
+
+    #[test]
+    fn encoder_emits_periodic_idr_after_many_frames() {
+        // After ~150 frames (5 seconds at 30 fps) the encoder should
+        // have emitted at least one additional keyframe beyond the
+        // initial IDR. We can't easily inspect NAL types without a
+        // full bitstream parser, but we CAN look for the
+        // SPS/PPS+IDR fingerprint: a frame whose size is notably
+        // larger than its P-frame neighbors.
+        let mut enc = H264Encoder::new(64, 48, 30).unwrap();
+        let mut sizes = Vec::new();
+        for i in 0..150 {
+            let mut bgra = vec![0u8; 64 * 48 * 4];
+            // Animate so the encoder produces real deltas.
+            for px in bgra.chunks_exact_mut(4) {
+                px[0] = (i % 200) as u8;
+            }
+            let f = enc.encode_bgra(&bgra).unwrap();
+            sizes.push(f.len());
+        }
+        // First frame is the SPS+PPS+IDR opener.
+        let first = sizes[0];
+        // At least one frame after the first should be a similar
+        // "spike" (encoder-internal keyframe refresh).
+        let mid_spike = sizes[1..]
+            .iter()
+            .any(|&s| s as f32 > (first as f32) * 0.5);
+        assert!(
+            mid_spike,
+            "expected at least one keyframe-sized refresh after frame 0: sizes={:?}",
+            sizes.iter().take(20).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn encoder_rejects_buffer_size_off_by_chroma_padding() {
+        // Off-by-one buffers must fail loudly rather than silently
+        // producing garbage frames.
+        let mut enc = H264Encoder::new(64, 48, 30).unwrap();
+        let off_by_one = vec![0u8; 64 * 48 * 4 + 4];
+        assert!(enc.encode_bgra(&off_by_one).is_err());
+        let off_by_four = vec![0u8; 64 * 48 * 4 - 4];
+        assert!(enc.encode_bgra(&off_by_four).is_err());
+    }
+
+    #[test]
+    fn bgra_to_yuv420_pure_blue_has_positive_u_offset() {
+        // Blue has strong U (blue-difference) channel.
+        let mut bgra = vec![0u8; 4 * 4 * 4];
+        for px in bgra.chunks_exact_mut(4) {
+            px[0] = 255; // B
+        }
+        let yuv = bgra_to_yuv420(&bgra, 4, 4);
+        let y_size = 4 * 4;
+        let u_start = y_size;
+        for &u in &yuv[u_start..u_start + 4] {
+            assert!(u > 180, "U for blue should be ≫ 128, got {}", u);
+        }
+    }
+
+    #[test]
+    fn bgra_to_yuv420_pure_black_maps_to_min_luma() {
+        // RGB(0,0,0) → Y = 16 (limited range floor), U=V=128.
+        let bgra = vec![0u8; 4 * 4 * 4];
+        let yuv = bgra_to_yuv420(&bgra, 4, 4);
+        for &y in &yuv[..16] {
+            assert!((14..=18).contains(&y), "Y for black should be ~16, got {}", y);
+        }
+    }
 }

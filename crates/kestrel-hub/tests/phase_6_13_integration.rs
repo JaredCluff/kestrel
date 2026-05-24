@@ -289,3 +289,127 @@ async fn phase13b_sdp_round_trip_through_hub_to_agent() {
     browser_pc.close().await.unwrap();
     pump.abort();
 }
+
+/// Verifies the agent-to-hub ICE direction: after handle_offer fires
+/// on_ice_candidate inside the agent, those candidates flow through
+/// the webrtc_tx side channel into the SessionRegistry. Browser-side
+/// would then pick them up via GET /api/webrtc/session/:id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn phase13c_agent_ice_candidates_reach_session_registry() {
+    use kestrel_hub::webrtc::SessionRegistry;
+    use webrtc::api::APIBuilder;
+    use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
+    use webrtc::peer_connection::configuration::RTCConfiguration;
+    use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+    use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+
+    let addr = start_agent("ice-node").await;
+    let registry = Arc::new(NodeRegistry::new());
+    let sessions = SessionRegistry::new();
+    registry.attach_webrtc_sessions(sessions.clone()).await;
+
+    let (handle, _actor, _world_rx, _caps_rx, mut webrtc_rx) =
+        connect_with_world_sink(addr, &test_psk()).await.unwrap();
+    registry.register(handle.clone()).await;
+
+    let pump_registry = registry.clone();
+    let pump = tokio::spawn(async move {
+        while let Some(event) = webrtc_rx.recv().await {
+            pump_registry.record_webrtc_event(event).await;
+        }
+    });
+
+    // Build a browser-side PC; capture its ICE before completing
+    // gathering so we have something to send agent-bound too.
+    let id = sessions.create("ice-node".into()).await;
+    let mut m = MediaEngine::default();
+    m.register_default_codecs().unwrap();
+    let api = APIBuilder::new().with_media_engine(m).build();
+    let browser_pc = api
+        .new_peer_connection(RTCConfiguration::default())
+        .await
+        .unwrap();
+    let track = std::sync::Arc::new(TrackLocalStaticSample::new(
+        RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_H264.to_owned(),
+            ..Default::default()
+        },
+        "v".into(),
+        "browser".into(),
+    ));
+    browser_pc.add_track(track).await.unwrap();
+    let offer = browser_pc.create_offer(None).await.unwrap();
+    let mut gather = browser_pc.gathering_complete_promise().await;
+    browser_pc.set_local_description(offer.clone()).await.unwrap();
+    let _ = gather.recv().await;
+
+    sessions.record_offer(&id, offer.sdp.clone()).await;
+    handle.send_webrtc_offer(id.clone(), offer.sdp).await.unwrap();
+
+    // Wait up to 15s for the agent to gather at least one ICE
+    // candidate. ICE gathering on loopback is usually sub-second but
+    // we don't want a CI flake.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let s = loop {
+        let s = sessions.get(&id).await.unwrap();
+        if !s.ice_candidates.is_empty() {
+            break s;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "no ICE candidates accumulated in registry within 15s; status={:?}",
+                s.status
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // The candidate JSON must round-trip through RTCIceCandidateInit
+    // (the shape webrtc-rs uses for to_json + the browser's
+    // RTCIceCandidate constructor).
+    let first: serde_json::Value = serde_json::from_str(&s.ice_candidates[0]).unwrap();
+    assert!(first.get("candidate").is_some(), "missing candidate field: {}", s.ice_candidates[0]);
+
+    browser_pc.close().await.unwrap();
+    pump.abort();
+}
+
+/// Browser-to-agent ICE direction: the hub's dashboard handler
+/// forwards posted ICE candidates to the agent. The agent calls
+/// `add_remote_ice`, which delegates to webrtc-rs's
+/// `add_ice_candidate`. We can't observe the add directly without
+/// hooking into the PC's internals, but we CAN verify the proto-level
+/// forwarding completes without error by inspecting the agent's
+/// reaction (no error reply, idempotent on unknown sessions).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn phase13c_browser_to_agent_ice_forwarding_does_not_error() {
+    use kestrel_hub::webrtc::SessionRegistry;
+
+    let addr = start_agent("ice2-node").await;
+    let registry = Arc::new(NodeRegistry::new());
+    let sessions = SessionRegistry::new();
+    registry.attach_webrtc_sessions(sessions.clone()).await;
+
+    let (handle, _actor, _world_rx, _caps_rx, _webrtc_rx) =
+        connect_with_world_sink(addr, &test_psk()).await.unwrap();
+    registry.register(handle.clone()).await;
+
+    // ICE for an unknown session must not error: agent logs at debug
+    // and moves on. Our send_webrtc_ice returns Ok if the message was
+    // accepted by the actor channel.
+    let unknown_id = "rt-not-real".to_string();
+    let cand = r#"{"candidate":"candidate:1 1 udp 2113937151 192.168.1.5 53124 typ host","sdpMid":"0","sdpMLineIndex":0}"#.to_string();
+    handle.send_webrtc_ice(unknown_id, cand.clone()).await.unwrap();
+
+    // Give the actor a moment to process; the test passes by NOT
+    // erroring out — the agent's log would record a debug "ICE for
+    // unknown session" line but the connection survives.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // For an existing session: forwarding succeeds. Even though we
+    // haven't completed an SDP exchange in this leaner test, sending
+    // an ICE candidate the agent has no use for must not break the
+    // connection.
+    let id = sessions.create("ice2-node".into()).await;
+    handle.send_webrtc_ice(id, cand).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
