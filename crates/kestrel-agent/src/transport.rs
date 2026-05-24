@@ -93,19 +93,59 @@ pub async fn serve(
     if let Some(tx) = ready {
         let _ = tx.send(bound);
     }
+    // Graceful shutdown: SIGTERM / SIGINT stops the accept loop and
+    // returns. In-flight per-connection tasks are detached; their own
+    // I/O closes when the runtime tears down, and Drop on ShellManager
+    // runs close_all() so PTY children get SIGKILL'd instead of zombied.
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(e) => { tracing::error!("accept error: {}", e); continue; }
-        };
-        let acceptor = acceptor.clone();
-        let psk = config.psk.clone();
-        let node_id = config.node_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, peer, acceptor, psk, node_id).await {
-                tracing::warn!("connection from {} closed: {}", peer, e);
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (stream, peer) = match accept_result {
+                    Ok(pair) => pair,
+                    Err(e) => { tracing::error!("accept error: {}", e); continue; }
+                };
+                let acceptor = acceptor.clone();
+                let psk = config.psk.clone();
+                let node_id = config.node_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_conn(stream, peer, acceptor, psk, node_id).await {
+                        tracing::warn!("connection from {} closed: {}", peer, e);
+                    }
+                });
             }
-        });
+            _ = wait_for_shutdown_signal() => {
+                tracing::info!("agent: shutdown signal received, stopping accept loop");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Listen for SIGTERM / SIGINT (Unix) or Ctrl-C (Windows) and resolve
+/// when either fires. Mirrors the hub's shutdown plumbing but lives
+/// in-process here since the agent doesn't need the broadcast-to-many
+/// pattern — there's only one consumer (the accept loop).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let sigterm = signal(SignalKind::terminate());
+        match sigterm {
+            Ok(mut s) => {
+                tokio::select! {
+                    _ = s.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("agent: SIGTERM listener unavailable ({}), only Ctrl-C will trigger shutdown", e);
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

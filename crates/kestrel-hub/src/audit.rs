@@ -69,8 +69,20 @@ enum AuditInner {
         // calls; a brief lock around format + write is simpler than
         // wrangling pwrite/pwrite_at across platforms.
         file: Mutex<File>,
+        // Writes-since-last-fsync. We auto-fsync after every
+        // `FSYNC_EVERY_N_WRITES` entries to bound the in-flight loss
+        // window during normal operation. Wraps `u64` (no cap on
+        // hub uptime, fsync just runs every N forever).
+        writes_since_fsync: std::sync::atomic::AtomicU64,
     },
 }
+
+/// Auto-fsync the audit log after this many `log` calls. The other
+/// fsync trigger is graceful shutdown (`flush()`). At our typical tool-
+/// call rate (one call every few seconds) this works out to a fsync
+/// every couple of minutes; on a hub being driven hard by an AI agent
+/// (50+ calls/sec) it caps the in-flight loss window at one second.
+const FSYNC_EVERY_N_WRITES: u64 = 50;
 
 impl AuditLogger {
     /// Audit-disabled logger. All `log` calls become no-ops.
@@ -83,10 +95,24 @@ impl AuditLogger {
     /// Open `path` in append mode (creating if absent). Returns Err if
     /// the file can't be opened; callers can fall back to `disabled()`
     /// with a warning rather than failing hub startup.
+    ///
+    /// On Unix, NEW files are created with mode 0600 (owner read+write
+    /// only) so the audit trail can't be world-readable by accident.
+    /// Pre-existing files keep their current mode — `chmod` is the
+    /// operator's call there.
     pub async fn file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            // 0600: -rw------- for owner only. If the file already
+            // exists with a different mode, this flag is ignored
+            // (open(2) only applies `mode` on O_CREAT-triggered creation).
+            // tokio::fs::OpenOptions has `mode()` built-in on Unix —
+            // no separate `OpenOptionsExt` import needed.
+            opts.mode(0o600);
+        }
+        let file = opts
             .open(path.as_ref())
             .await
             .map_err(|e| {
@@ -95,8 +121,31 @@ impl AuditLogger {
         Ok(AuditLogger {
             inner: Arc::new(AuditInner::File {
                 file: Mutex::new(file),
+                writes_since_fsync: std::sync::atomic::AtomicU64::new(0),
             }),
         })
+    }
+
+    /// Explicitly fsync the audit log. Called on graceful shutdown so
+    /// the OS page cache lands on disk before the process exits. A
+    /// no-op for the disabled logger.
+    ///
+    /// Best-effort: an fsync failure is logged at warn but not
+    /// propagated — same posture as our write path. If the disk is
+    /// truly dead, the operator already has bigger problems than
+    /// "the last audit line might be lost."
+    pub async fn flush(&self) {
+        let AuditInner::File { file, writes_since_fsync } = &*self.inner else {
+            return;
+        };
+        let mut f = file.lock().await;
+        if let Err(e) = f.flush().await {
+            tracing::warn!("audit flush failed: {}", e);
+        }
+        if let Err(e) = f.sync_all().await {
+            tracing::warn!("audit fsync failed: {}", e);
+        }
+        writes_since_fsync.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Append one entry. Best-effort: write errors are logged via
@@ -118,7 +167,7 @@ impl AuditLogger {
         duration_ms: u64,
         error: Option<&str>,
     ) {
-        let AuditInner::File { file } = &*self.inner else {
+        let AuditInner::File { file, writes_since_fsync } = &*self.inner else {
             return;
         };
         let ts_unix = std::time::SystemTime::now()
@@ -144,6 +193,19 @@ impl AuditLogger {
         if let Err(e) = f.write_all(line.as_bytes()).await {
             tracing::warn!("audit log write failed: {}", e);
         }
+        // Bump the counter; periodic fsync caps the in-flight loss
+        // window without paying a sync on every write.
+        let n = writes_since_fsync
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if n >= FSYNC_EVERY_N_WRITES {
+            // Reset before the sync so a concurrent writer doesn't
+            // also trip the threshold.
+            writes_since_fsync.store(0, std::sync::atomic::Ordering::SeqCst);
+            if let Err(e) = f.sync_all().await {
+                tracing::warn!("audit periodic fsync failed: {}", e);
+            }
+        }
     }
 
     pub async fn log(
@@ -155,7 +217,7 @@ impl AuditLogger {
         duration_ms: u64,
         error: Option<&str>,
     ) {
-        let AuditInner::File { file } = &*self.inner else {
+        let AuditInner::File { file, writes_since_fsync } = &*self.inner else {
             return;
         };
         let ts_unix = SystemTime::now()
@@ -181,10 +243,18 @@ impl AuditLogger {
         if let Err(e) = f.write_all(line.as_bytes()).await {
             tracing::warn!("audit log write failed: {}", e);
         }
-        // Flush is intentionally NOT called per-write — the OS buffer
-        // flushes on file drop, on close, or on explicit fsync. We
-        // accept the small loss window in exchange for higher throughput
-        // under bursts of tool calls.
+        // Periodic fsync: caps the in-flight loss window without
+        // paying a sync on every write. Explicit graceful shutdown
+        // calls `flush()` to drain the remainder.
+        let n = writes_since_fsync
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if n >= FSYNC_EVERY_N_WRITES {
+            writes_since_fsync.store(0, std::sync::atomic::Ordering::SeqCst);
+            if let Err(e) = f.sync_all().await {
+                tracing::warn!("audit periodic fsync failed: {}", e);
+            }
+        }
     }
 }
 
@@ -374,5 +444,71 @@ mod tests {
         for line in &lines {
             let _: serde_json::Value = serde_json::from_str(line).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_is_created_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let _log = AuditLogger::file(&path).await.unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "audit log must be owner-only, got {:o}", mode);
+    }
+
+    #[tokio::test]
+    async fn flush_resets_writes_counter_and_syncs() {
+        // We can't directly observe an fsync from a unit test, but
+        // we CAN verify the contract: after `flush()`, the in-memory
+        // counter is back to zero so the next entry doesn't trigger
+        // an immediate auto-fsync.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let log = AuditLogger::file(&path).await.unwrap();
+        for i in 0..10 {
+            log.log("op", "n", &format!("i={i}"), CallStatus::Ok, 1, None).await;
+        }
+        log.flush().await;
+        // Inspect the counter directly — internal but the test lives
+        // in the same module so we can.
+        if let AuditInner::File { writes_since_fsync, .. } = &*log.inner {
+            assert_eq!(
+                writes_since_fsync.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "flush should reset the periodic-fsync counter"
+            );
+        } else {
+            panic!("expected File variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn periodic_fsync_resets_counter_at_threshold() {
+        // After exactly FSYNC_EVERY_N_WRITES entries, the counter
+        // should wrap back to zero (auto-fsync fired).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let log = AuditLogger::file(&path).await.unwrap();
+        for i in 0..FSYNC_EVERY_N_WRITES {
+            log.log("op", "n", &format!("i={i}"), CallStatus::Ok, 1, None).await;
+        }
+        if let AuditInner::File { writes_since_fsync, .. } = &*log.inner {
+            assert_eq!(
+                writes_since_fsync.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "auto-fsync should have reset the counter at threshold"
+            );
+        } else {
+            panic!("expected File variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_flush_is_a_noop() {
+        // No panic, no I/O — just returns.
+        let log = AuditLogger::disabled();
+        log.flush().await;
     }
 }
