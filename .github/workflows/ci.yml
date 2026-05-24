@@ -128,6 +128,56 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --no-fail-fast
 
+  coverage:
+    name: cargo llvm-cov (ubuntu)
+    runs-on: ubuntu-latest
+    # Report-only for now — we don't fail the build below a threshold
+    # until we know what a baseline "healthy coverage" number looks
+    # like for this workspace. Once we've seen it for a few PRs, add
+    # `--fail-under-lines N` to gate.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install platform deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libatspi2.0-dev \
+            libxdo-dev \
+            libxtst-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libdbus-1-dev \
+            libssl-dev \
+            pkg-config \
+            nasm
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+          cache-key: ubuntu-coverage
+      - name: Install cargo-llvm-cov
+        # taiki-e maintains the canonical Rust coverage action. Pinned
+        # by version (not @main) so a future breaking change doesn't
+        # silently break our coverage run.
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        # `--workspace` to cover every crate. `--all-targets` so
+        # integration tests count toward coverage of the lib code
+        # they exercise. lcov format for tooling compatibility;
+        # `--summary-only` ALSO prints a per-file + total summary
+        # to the job log so the PR reviewer can see the number
+        # without downloading the artifact.
+        run: |
+          cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-coverage
+          path: lcov.info
+          retention-days: 14
+
   # NOTE: A `cargo fmt --check` job is intentionally NOT wired up yet.
   # The codebase has accumulated some fmt drift that should be cleaned
   # up in one focused PR before gating CI on it — otherwise the first
