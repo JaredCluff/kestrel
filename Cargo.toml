@@ -5,6 +5,12 @@ members = [
     "crates/kestrel-hub",
     "crates/kestrel-test",
 ]
+# fuzz/ is intentionally NOT in the workspace. `cargo fuzz` rebuilds
+# under nightly with sanitizer flags that don't play nicely with the
+# stable-built workspace cache; keeping it out-of-tree means `cargo
+# test` in the workspace stays unaffected. Run targets via
+# `cargo +nightly fuzz run <target>` from the fuzz/ directory.
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.dependencies]
