@@ -369,7 +369,21 @@ async fn main() -> anyhow::Result<()> {
             };
 
             println!("Kestrel hub started. Serving MCP via stdio.");
-            let mcp = KestrelMcp::with_audit(registry, audit);
+            // If the operator configured a [sandbox.bootstrap] section,
+            // attach it so sandbox_spawn auto-installs the agent in
+            // freshly provisioned VMs. Otherwise use a bare registry.
+            let sandboxes = match &cfg.sandbox_bootstrap {
+                Some(bootstrap_cfg) => {
+                    println!(
+                        "Sandbox bootstrap enabled (agent binary: {})",
+                        bootstrap_cfg.agent_binary.display()
+                    );
+                    kestrel_hub::sandbox::SandboxRegistry::new()
+                        .with_bootstrap(bootstrap_cfg.clone(), master_secret.clone())
+                }
+                None => kestrel_hub::sandbox::SandboxRegistry::new(),
+            };
+            let mcp = KestrelMcp::with_audit_and_sandboxes(registry, audit, sandboxes);
             let service = mcp.serve(stdio()).await.inspect_err(|e| {
                 tracing::error!("MCP serve error: {e:?}");
             })?;

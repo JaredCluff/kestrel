@@ -7,6 +7,11 @@ pub struct HubConfig {
     pub listen_dashboard: SocketAddr,
     pub nodes: Vec<NodeConfig>,
     pub layout: Vec<NodeLayout>,
+    /// Optional sandbox VM bootstrap config. When present, the Tart
+    /// backend auto-installs the kestrel-agent into freshly provisioned
+    /// VMs over SSH. Absent = today's behavior (operator installs the
+    /// agent manually inside the VM image).
+    pub sandbox_bootstrap: Option<crate::sandbox_bootstrap::SandboxBootstrapConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +34,7 @@ impl HubConfig {
     /// invoking this method, not a hypothetical `str.parse()` path.
     pub fn from_toml_str(s: &str) -> anyhow::Result<Self> {
         #[derive(Deserialize)]
-        struct Raw { hub: RawHub }
+        struct Raw { hub: RawHub, #[serde(default)] sandbox: Option<RawSandbox> }
         #[derive(Deserialize)]
         struct RawHub {
             listen_mcp: String,
@@ -38,6 +43,11 @@ impl HubConfig {
             nodes: Vec<RawNode>,
             #[serde(default)]
             layout: Vec<RawLayout>,
+        }
+        #[derive(Deserialize)]
+        struct RawSandbox {
+            #[serde(default)]
+            bootstrap: Option<crate::sandbox_bootstrap::SandboxBootstrapConfig>,
         }
         #[derive(Deserialize)]
         struct RawNode { node_id: String, address: String }
@@ -60,6 +70,7 @@ impl HubConfig {
                 col: l.position.col,
                 row: l.position.row,
             }).collect(),
+            sandbox_bootstrap: raw.sandbox.and_then(|s| s.bootstrap),
         })
     }
 

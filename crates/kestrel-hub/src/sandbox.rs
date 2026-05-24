@@ -60,6 +60,19 @@ pub enum SandboxStatus {
 #[derive(Clone)]
 pub struct SandboxRegistry {
     inner: Arc<RwLock<HashMap<SandboxId, Sandbox>>>,
+    /// Optional auto-installer. When set, after a backend successfully
+    /// provisions a VM, this is invoked to scp+ssh the kestrel-agent
+    /// into the guest with the per-node PSK. None preserves today's
+    /// behavior (operator handles agent install themselves).
+    bootstrap: Option<Arc<BootstrapCtx>>,
+}
+
+/// Together: a static bootstrap config + the hub's master_secret
+/// (needed to derive each sandbox's per-node PSK at install time).
+/// Held in an Arc so it can be cloned cheaply into the spawn task.
+pub struct BootstrapCtx {
+    pub config: crate::sandbox_bootstrap::SandboxBootstrapConfig,
+    pub master_secret: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl Default for SandboxRegistry {
@@ -70,7 +83,20 @@ impl Default for SandboxRegistry {
 
 impl SandboxRegistry {
     pub fn new() -> Self {
-        Self { inner: Arc::new(RwLock::new(HashMap::new())) }
+        Self { inner: Arc::new(RwLock::new(HashMap::new())), bootstrap: None }
+    }
+
+    /// Attach an auto-installer that runs after a backend reports
+    /// Ready. The installer derives a per-node PSK from `master_secret`
+    /// + sandbox_id (matches the rest of the hub's PSK derivation),
+    /// scps the agent binary in, and ssh-launches it.
+    pub fn with_bootstrap(
+        mut self,
+        config: crate::sandbox_bootstrap::SandboxBootstrapConfig,
+        master_secret: zeroize::Zeroizing<Vec<u8>>,
+    ) -> Self {
+        self.bootstrap = Some(Arc::new(BootstrapCtx { config, master_secret }));
+        self
     }
 
     /// Spawn a sandbox using the appropriate backend for the host.
@@ -95,22 +121,53 @@ impl SandboxRegistry {
             map.insert(id.clone(), entry);
         }
         // Spawn the provisioning task. Updates the entry's status
-        // and backend_handle when done. v1 here is a stub that
-        // immediately fails — real implementations replace this with
-        // the backend's actual subprocess calls.
+        // and backend_handle when done. If a bootstrap context is
+        // attached, runs the SSH agent-install after the backend
+        // reports Ready — a bootstrap failure marks the entry Failed
+        // even though the VM is provisioned (so the operator notices),
+        // but doesn't auto-teardown the VM (forensics).
         let inner = self.inner.clone();
         let id_for_task = id.clone();
         let image_for_task = image.to_string();
+        let bootstrap = self.bootstrap.clone();
         tokio::spawn(async move {
             let result = backend.provision(&id_for_task, &image_for_task).await;
-            let mut map = inner.write().await;
-            if let Some(entry) = map.get_mut(&id_for_task) {
-                match result {
-                    Ok(handle) => {
-                        entry.backend_handle = Some(handle);
-                        entry.status = SandboxStatus::Ready;
+            let handle = match &result {
+                Ok(h) => Some(h.clone()),
+                Err(_) => None,
+            };
+            {
+                let mut map = inner.write().await;
+                if let Some(entry) = map.get_mut(&id_for_task) {
+                    match &result {
+                        Ok(h) => {
+                            entry.backend_handle = Some(h.clone());
+                            entry.status = SandboxStatus::Ready;
+                        }
+                        Err(_) => entry.status = SandboxStatus::Failed,
                     }
-                    Err(_e) => {
+                }
+            }
+            // Bootstrap pass: only when the backend succeeded AND the
+            // registry was configured with an installer.
+            if let (Some(vm_name), Some(ctx)) = (handle, bootstrap) {
+                let psk = kestrel_proto::derive_per_node_psk(&ctx.master_secret, &id_for_task);
+                let psk_hex = hex::encode(psk);
+                let bootstrap_result = crate::sandbox_bootstrap::bootstrap(
+                    &ctx.config,
+                    &vm_name,
+                    &id_for_task,
+                    &psk_hex,
+                )
+                .await;
+                if let Err(e) = bootstrap_result {
+                    tracing::warn!(
+                        "sandbox bootstrap for {} failed: {} — VM left running for forensics",
+                        id_for_task,
+                        e
+                    );
+                    let mut map = inner.write().await;
+                    if let Some(entry) = map.get_mut(&id_for_task) {
                         entry.status = SandboxStatus::Failed;
                     }
                 }
