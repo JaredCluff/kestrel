@@ -51,3 +51,5 @@ eventsource-client = "0.13"
 zeroize            = { version = "1", features = ["derive"] }
 openidconnect     = "3"
 webrtc            = "0.11"
+openh264          = "0.6"
+bytes             = "1"
