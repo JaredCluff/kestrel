@@ -189,6 +189,30 @@ In another terminal (or another host):
 | `status` | Print loaded config + verify keyring PSK |
 | `unenroll [--yes] [--keep-config]` | Clear PSK from keyring; delete `kestrel.toml` unless `--keep-config`. Dry-run unless `--yes`. |
 
+## Rotation playbook
+
+### Rotate the master (full-fleet key rotation)
+
+When you suspect the hub's `master_secret` has leaked (compromised laptop, stolen backup), rotate everything:
+
+```bash
+kestrel-hub rotate-master --bind <hub-lan-ip>            # dry-run; shows what will happen
+kestrel-hub rotate-master --bind <hub-lan-ip> --yes      # do it; prints a new enrollment line per node
+```
+
+Run the printed enrollment line on each agent machine to install the new derived PSK, then restart the hub. Until every agent has re-enrolled, its supervisor will keep failing authentication — that's the desired property.
+
+### Rotate one node's PSK (suspected single-agent compromise)
+
+Per-node PSKs are deterministic from `(master_secret, node_id)`, so changing a single node's PSK requires changing one of those inputs. The lightest-touch path:
+
+1. `kestrel-hub remove-node <id>` on the hub
+2. `kestrel-agent unenroll --yes` on the compromised host
+3. `kestrel-hub add-node <id>-v2 <addr>` on the hub (or any new id — the agent is going to re-enroll)
+4. Run the printed enrollment line on the host
+
+The other agents' PSKs are unaffected since `master_secret` didn't change.
+
 ## Migrating from shared-PSK installs
 
 Older installs stored a single fleet-wide PSK under the `kestrel/psk` keyring entry and used the same key on every agent. New installs use a hub-side `master_secret` from which each agent's PSK is HKDF-derived per `node_id`. To migrate:
