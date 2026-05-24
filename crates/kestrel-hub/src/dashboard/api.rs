@@ -365,25 +365,31 @@ pub async fn webrtc_post_offer(
     axum::Json(body): axum::Json<WebrtcSdpBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
-    // Store the offer locally so /api/webrtc/session/:id GET shows it
-    // even before the agent answers.
+    // Store the offer locally (as the browser sent it — base64) so
+    // /api/webrtc/session/:id GET shows it even before the agent answers.
     if !state.webrtc_sessions.record_offer(&id, body.sdp_b64.clone()).await {
         return Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)));
     }
-    // Phase 13b: forward to the target agent so it can negotiate.
     let Some(session) = state.webrtc_sessions.get(&id).await else {
         return Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)));
     };
     let Some(handle) = state.registry.try_get(&session.node_id).await else {
-        // Agent not connected — session sits in OfferReceived. Browser
-        // can poll and timeout / show the error.
         return Ok(StatusCode::ACCEPTED);
     };
-    if let Err(e) = handle.send_webrtc_offer(id.clone(), body.sdp_b64).await {
+    // Agent works in raw SDP, not base64 — decode before forwarding.
+    let raw_sdp = decode_sdp_b64(&body.sdp_b64)
+        .ok_or((StatusCode::BAD_REQUEST, "invalid base64 / utf8 SDP".into()))?;
+    if let Err(e) = handle.send_webrtc_offer(id.clone(), raw_sdp).await {
         tracing::warn!("forward offer to agent {}: {}", session.node_id, e);
         return Err((StatusCode::BAD_GATEWAY, format!("forward to agent: {}", e)));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn decode_sdp_b64(b64: &str) -> Option<String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 pub async fn webrtc_post_answer(

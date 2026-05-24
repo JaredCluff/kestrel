@@ -25,11 +25,23 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
-use crate::capabilities::screen_stream::{self, EncodedFrame};
+use crate::capabilities::{screen, screen_stream::{self, EncodedFrame}};
+
+/// Probe the agent's primary display dimensions for normalizing
+/// inbound mouse coordinates. Falls back to 1920x1080 when no
+/// display is detected (headless test environments).
+fn primary_display_dims() -> (u32, u32) {
+    screen::list_displays()
+        .into_iter()
+        .next()
+        .map(|(_, w, h)| (w, h))
+        .unwrap_or((1920, 1080))
+}
 
 /// Construct a fresh RTCPeerConnection with default codecs + Google's
 /// public STUN. Operators with NAT'd networks should replace this
@@ -111,6 +123,148 @@ impl WebRtcSession {
     }
 }
 
+/// One JSON-serialized input event arriving over the WebRTC data
+/// channel. The browser-side `webrtc.js` produces these for keydown /
+/// keyup / mousemove / mousebutton / wheel events. Kept intentionally
+/// loose (untyped `String` fields for keys) so the wire stays simple
+/// and the browser doesn't need a code map. The agent maps strings
+/// to its KeyCode enum and dispatches into `capabilities::input`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InputEvent {
+    /// `code` is a DOM KeyboardEvent.code value (e.g. "KeyA", "Enter").
+    Key { code: String, modifiers: Modifiers, action: Action },
+    /// Synthetic typed text — the browser may batch quick keystrokes.
+    Text { text: String },
+    /// `x` and `y` are normalized 0.0..1.0 relative to the video element.
+    MouseMove { x: f64, y: f64 },
+    MouseButton { button: MouseButton, action: Action, x: f64, y: f64 },
+    Scroll { dx: f64, dy: f64 },
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, Default)]
+pub struct Modifiers {
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub meta: bool,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Press,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// Dispatch one decoded InputEvent into the agent's existing input
+/// capability. Display dimensions are needed to denormalize mouse
+/// coords; v1 uses the agent's primary display. Errors are surfaced
+/// for the caller's logging.
+pub async fn dispatch_input(
+    event: InputEvent,
+    display_w: u32,
+    display_h: u32,
+) -> anyhow::Result<()> {
+    use kestrel_proto::{Button, KeyCode, PressRelease};
+
+    let to_press_release = |a: Action| match a {
+        Action::Press => PressRelease::Press,
+        Action::Release => PressRelease::Release,
+    };
+    let to_button = |b: MouseButton| match b {
+        MouseButton::Left => Button::Left,
+        MouseButton::Right => Button::Right,
+        MouseButton::Middle => Button::Middle,
+    };
+    let to_modifiers = |m: Modifiers| kestrel_proto::Modifiers {
+        shift: m.shift,
+        ctrl: m.ctrl,
+        alt: m.alt,
+        meta: m.meta,
+    };
+
+    match event {
+        InputEvent::Key { code, modifiers, action } => {
+            let key = key_from_dom_code(&code)
+                .ok_or_else(|| anyhow::anyhow!("unknown DOM key code: {}", code))?;
+            crate::capabilities::input::inject_key_event(
+                key,
+                to_modifiers(modifiers),
+                to_press_release(action),
+            )
+            .await
+        }
+        InputEvent::Text { text } => crate::capabilities::input::inject_text(text).await,
+        InputEvent::MouseMove { x, y } => {
+            crate::capabilities::input::inject_mouse_move(x, y, display_w, display_h).await
+        }
+        InputEvent::MouseButton { button, action, x, y } => {
+            crate::capabilities::input::inject_mouse_button(
+                to_button(button),
+                to_press_release(action),
+                x,
+                y,
+                display_w,
+                display_h,
+            )
+            .await
+        }
+        InputEvent::Scroll { dx, dy } => {
+            crate::capabilities::input::inject_scroll(dx, dy).await
+        }
+    }
+}
+
+/// Translate a DOM KeyboardEvent.code string into the proto's KeyCode.
+/// Covers the common keys; uncommon ones (function keys past F12,
+/// non-Latin layouts) return None and the dispatch layer logs.
+pub fn key_from_dom_code(code: &str) -> Option<kestrel_proto::KeyCode> {
+    use kestrel_proto::KeyCode;
+    // Letters: "KeyA" .. "KeyZ"
+    if let Some(rest) = code.strip_prefix("Key") {
+        if rest.len() == 1 {
+            let ch = rest.chars().next().unwrap();
+            return Some(KeyCode::Char(ch.to_ascii_lowercase()));
+        }
+    }
+    // Digits: "Digit0" .. "Digit9"
+    if let Some(rest) = code.strip_prefix("Digit") {
+        if let Some(d) = rest.chars().next() {
+            return Some(KeyCode::Char(d));
+        }
+    }
+    Some(match code {
+        "Enter" => KeyCode::Return,
+        "Tab" => KeyCode::Tab,
+        "Backspace" => KeyCode::Backspace,
+        "Escape" => KeyCode::Escape,
+        "Space" => KeyCode::Space,
+        "ArrowUp" => KeyCode::Up,
+        "ArrowDown" => KeyCode::Down,
+        "ArrowLeft" => KeyCode::Left,
+        "ArrowRight" => KeyCode::Right,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "PageUp" => KeyCode::PageUp,
+        "PageDown" => KeyCode::PageDown,
+        "Delete" => KeyCode::Delete,
+        _ => return None,
+    })
+}
+
 /// Handle a `Payload::WebRtcOffer` arriving from the hub. Boots a
 /// screen capture stream, wires it through a new `WebRtcSession`,
 /// completes the SDP answer half of the negotiation, and registers an
@@ -129,8 +283,33 @@ pub async fn handle_offer(
     let frames = screen_stream::spawn(0, 30);
     let session = Arc::new(WebRtcSession::new(frames).await?);
 
-    // Wire ICE-candidate emission back through event_tx as serialized
-    // RTCIceCandidateInit JSON (matches browser-side / webrtc-rs shape).
+    // Wire input-event reception from the browser's data channel into
+    // the agent's existing input capability. The browser opens an
+    // "input" channel inside its offer (negotiated by SDP); this
+    // handler fires on every inbound message regardless of channel
+    // label so we don't have to plumb a separate channel-id config.
+    let pc = session.pc.clone();
+    let (input_w, input_h) = primary_display_dims();
+    pc.on_data_channel(Box::new(move |dc| {
+        Box::pin(async move {
+            dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                let payload = String::from_utf8_lossy(&msg.data).to_string();
+                Box::pin(async move {
+                    let event: InputEvent = match serde_json::from_str(&payload) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::debug!("webrtc input: parse failed: {} ({})", e, payload);
+                            return;
+                        }
+                    };
+                    if let Err(e) = dispatch_input(event, input_w, input_h).await {
+                        tracing::warn!("webrtc input dispatch: {}", e);
+                    }
+                })
+            }));
+        })
+    }));
+
     let pc = session.pc.clone();
     let event_tx_for_ice = event_tx.clone();
     let sid_for_ice = session_id.clone();
@@ -239,6 +418,64 @@ mod tests {
         drop(tx);
         tokio::time::sleep(Duration::from_millis(50)).await;
         session.pc.close().await.unwrap();
+    }
+
+    #[test]
+    fn key_from_dom_code_handles_letters_digits_specials() {
+        use kestrel_proto::KeyCode;
+        assert!(matches!(key_from_dom_code("KeyA"), Some(KeyCode::Char('a'))));
+        assert!(matches!(key_from_dom_code("KeyZ"), Some(KeyCode::Char('z'))));
+        assert!(matches!(key_from_dom_code("Digit5"), Some(KeyCode::Char('5'))));
+        assert!(matches!(key_from_dom_code("Enter"), Some(KeyCode::Return)));
+        assert!(matches!(key_from_dom_code("ArrowLeft"), Some(KeyCode::Left)));
+        assert!(matches!(key_from_dom_code("Space"), Some(KeyCode::Space)));
+        assert!(key_from_dom_code("UnknownThing").is_none());
+    }
+
+    #[test]
+    fn input_event_json_decodes_each_variant() {
+        let key: InputEvent = serde_json::from_str(
+            r#"{"kind":"key","code":"KeyA","modifiers":{"shift":true},"action":"press"}"#,
+        )
+        .unwrap();
+        match key {
+            InputEvent::Key { code, modifiers, action } => {
+                assert_eq!(code, "KeyA");
+                assert!(modifiers.shift);
+                assert!(matches!(action, Action::Press));
+            }
+            _ => panic!("expected Key"),
+        }
+
+        let mv: InputEvent = serde_json::from_str(
+            r#"{"kind":"mouse_move","x":0.5,"y":0.25}"#,
+        )
+        .unwrap();
+        match mv {
+            InputEvent::MouseMove { x, y } => {
+                assert!((x - 0.5).abs() < 1e-9);
+                assert!((y - 0.25).abs() < 1e-9);
+            }
+            _ => panic!("expected MouseMove"),
+        }
+
+        let btn: InputEvent = serde_json::from_str(
+            r#"{"kind":"mouse_button","button":"left","action":"release","x":0.1,"y":0.2}"#,
+        )
+        .unwrap();
+        assert!(matches!(btn, InputEvent::MouseButton { button: MouseButton::Left, .. }));
+
+        let sc: InputEvent = serde_json::from_str(r#"{"kind":"scroll","dx":0.0,"dy":-3.0}"#).unwrap();
+        assert!(matches!(sc, InputEvent::Scroll { .. }));
+
+        let txt: InputEvent = serde_json::from_str(r#"{"kind":"text","text":"hi"}"#).unwrap();
+        assert!(matches!(txt, InputEvent::Text { .. }));
+    }
+
+    #[test]
+    fn input_event_json_rejects_unknown_kind() {
+        let bad = serde_json::from_str::<InputEvent>(r#"{"kind":"sneeze"}"#);
+        assert!(bad.is_err());
     }
 
     #[tokio::test]

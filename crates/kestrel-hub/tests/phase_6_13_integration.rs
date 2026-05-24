@@ -273,7 +273,12 @@ async fn phase13b_sdp_round_trip_through_hub_to_agent() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    let answer_sdp = answered.answer_b64.expect("answer SDP recorded");
+    let answer_b64 = answered.answer_b64.expect("answer SDP recorded");
+    use base64::Engine;
+    let answer_sdp = String::from_utf8(
+        base64::engine::general_purpose::STANDARD.decode(&answer_b64).unwrap(),
+    )
+    .unwrap();
     assert!(answer_sdp.contains("m=video"), "expected video m-line in answer SDP");
     assert!(
         answer_sdp.to_lowercase().contains("h264"),
