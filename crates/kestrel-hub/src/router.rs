@@ -95,9 +95,14 @@ impl NodeRegistry {
         let Some(sessions) = guard.as_ref() else { return };
         match event {
             crate::transport::WebRtcEvent::Answer { session_id, sdp } => {
-                let _ = sessions.record_answer(&session_id, sdp).await;
+                // Agent gives us raw SDP; browser expects base64 (the
+                // wire is double-encoded for safety across HTTP/JSON).
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(sdp.as_bytes());
+                let _ = sessions.record_answer(&session_id, b64).await;
             }
             crate::transport::WebRtcEvent::Ice { session_id, candidate } => {
+                // Candidates are already JSON; pass through unchanged.
                 let _ = sessions.record_ice(&session_id, candidate).await;
             }
         }

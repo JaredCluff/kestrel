@@ -43,6 +43,63 @@ pub fn page_with_error(nodes: &[NodeStatus], authed: bool, error: &str) -> Marku
     page_inner(nodes, &[], &HashMap::new(), authed, Some(error))
 }
 
+/// Per-node live-stream page. Renders a single `<video>` element that
+/// the bundled webrtc.js wires to an RTCPeerConnection. Keyboard +
+/// mouse events inside the video bubble back over the data channel.
+/// Intentionally austere — matches the rest of the dashboard's
+/// restrained aesthetic.
+pub fn node_detail(node_id: &str, authed: bool) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "Kestrel — " (node_id) }
+                link rel="stylesheet" href="/assets/dashboard.css";
+                script src="/assets/webrtc.js" {}
+                style {
+                    "video.kestrel-stream { width:100%; max-width:1280px; background:#000; display:block; outline:none; cursor:crosshair; }"
+                }
+            }
+            body {
+                main {
+                    header {
+                        a href="/" { "← Nodes" }
+                        span.count { (node_id) }
+                        span.auth {
+                            @if authed {
+                                form method="post" action="/logout" {
+                                    button.linkish type="submit" { "Sign out" }
+                                }
+                            } @else {
+                                a href="/login" { "Sign in" }
+                            }
+                        }
+                    }
+                    @if !authed {
+                        p.error {
+                            "Sign in to view this node's live stream."
+                        }
+                    } @else {
+                        video.kestrel-stream id="kv" autoplay muted playsinline {}
+                        script {
+                            (maud::PreEscaped(format!(
+                                "KestrelWebRTC.start({:?}, document.getElementById('kv')).catch(e => {{ \
+                                  console.error('webrtc start failed:', e); \
+                                  document.querySelector('main').insertAdjacentHTML('beforeend', \
+                                    '<p class=\"error\">stream failed: ' + e.message + '</p>'); \
+                                }});",
+                                node_id
+                            )))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn page_inner(
     nodes: &[NodeStatus],
     layout: &[NodeLayout],

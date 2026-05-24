@@ -207,6 +207,7 @@ impl axum::extract::FromRef<AppState> for Arc<NodeRegistry> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/node/:node_id", get(node_detail_handler))
         .route("/sse", get(sse_handler))
         .route("/login", get(api::login_form).post(api::login_submit))
         .route("/logout", axum::routing::post(api::logout))
@@ -273,6 +274,15 @@ async fn index(
         }
     }
     templates::page_with_layout_and_world(&snapshot, &layout, &world_map, authed)
+}
+
+async fn node_detail_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+) -> maud::Markup {
+    let authed = api::is_authenticated(&state, &headers);
+    templates::node_detail(&node_id, authed)
 }
 
 async fn sse_handler(
