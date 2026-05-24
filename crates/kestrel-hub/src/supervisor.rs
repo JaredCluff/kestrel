@@ -209,6 +209,65 @@ mod tests {
         assert!(seen.len() > 5, "expected diverse jittered values, got only {}", seen.len());
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervisor_reconnect_loop_fires_repeatedly_under_paused_time() {
+        // Deterministic-time test: point the supervisor at a closed
+        // port (127.0.0.1:1 is reserved — connect() rejects ~instantly,
+        // not after a network timeout). The only real-clock dependency
+        // in the loop is `tokio::time::sleep(backoff)`, which `pause`
+        // makes virtual.
+        //
+        // Pinning this property deterministically means future tweaks
+        // to the backoff schedule have to be CORRECT, not just
+        // "passes when CI happens to be fast enough." Was the source
+        // of two timeout-bump papers in past PRs.
+        use crate::config::NodeConfig;
+        use crate::router::NodeRegistry;
+        use crate::events::NodeEvent;
+        use std::sync::Arc;
+
+        let registry = Arc::new(NodeRegistry::new());
+        let mut rx = registry.subscribe();
+        let _sup = spawn(
+            NodeConfig {
+                node_id: "doomed".into(),
+                address: "127.0.0.1:1".parse().unwrap(),
+            },
+            registry.clone(),
+            zeroize::Zeroizing::new(vec![0u8; 32]),
+        );
+
+        // Drive the loop forward in interleaved steps: each iteration
+        // yields so the spawned task can run (paused tokio::time::sleep
+        // returns instantly), then advances virtual time past the next
+        // backoff. We loop 6 times to cover 1 + 2 + 4 + 8 + 16 + 30 =
+        // 61 virtual seconds — long enough to see multiple Disconnects.
+        let mut disconnected = 0;
+        for _ in 0..6 {
+            // Yield first so the supervisor task gets a chance to
+            // make progress (initial connect attempt + Disconnected
+            // emission) before we advance past its sleep.
+            for _ in 0..3 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(Duration::from_secs(35)).await;
+        }
+        // Final drain.
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        while let Ok(evt) = rx.try_recv() {
+            if matches!(evt, NodeEvent::Disconnected { .. }) {
+                disconnected += 1;
+            }
+        }
+        assert!(
+            disconnected >= 3,
+            "expected ≥3 Disconnected events from a doomed supervisor under paused time, got {}",
+            disconnected
+        );
+    }
+
     #[test]
     fn jitter_respects_minimum_floor() {
         // The 50ms floor matters when base is small (attempt 0 base 1s

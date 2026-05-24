@@ -46,7 +46,12 @@ eventsource-client = { workspace = true }
 [dev-dependencies]
 kestrel-agent = { path = "../kestrel-agent" }
 kestrel-test  = { path = "../kestrel-test" }
-tokio         = { workspace = true }
+# `test-util` is what unlocks `tokio::time::{pause, advance, resume}`
+# and the `#[tokio::test(start_paused = true)]` attribute. Tokio
+# deliberately excludes it from the `full` feature so prod code can't
+# accidentally depend on virtual-clock semantics; we opt in here just
+# for the test build.
+tokio         = { workspace = true, features = ["test-util"] }
 tempfile      = { workspace = true }
 tower         = { workspace = true, features = ["util"] }
 rcgen         = "0.11"
