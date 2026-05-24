@@ -153,8 +153,23 @@ impl KestrelMcp {
     /// Construct with a specific audit logger. `kestrel-hub start` wires
     /// a file-backed logger here; tests use [`AuditLogger::disabled`].
     pub fn with_audit(registry: Arc<NodeRegistry>, audit: crate::audit::AuditLogger) -> Self {
+        Self::with_audit_and_sandboxes(
+            registry,
+            audit,
+            crate::sandbox::SandboxRegistry::new(),
+        )
+    }
+
+    /// Construct with a pre-built sandbox registry. `kestrel-hub start`
+    /// uses this when the operator's config attaches a SandboxBootstrap
+    /// installer to the sandbox registry — otherwise the default path
+    /// above creates a bare registry.
+    pub fn with_audit_and_sandboxes(
+        registry: Arc<NodeRegistry>,
+        audit: crate::audit::AuditLogger,
+        sandboxes: crate::sandbox::SandboxRegistry,
+    ) -> Self {
         let jobs = crate::jobs::JobRegistry::new(registry.clone());
-        let sandboxes = crate::sandbox::SandboxRegistry::new();
         KestrelMcp {
             registry,
             jobs,

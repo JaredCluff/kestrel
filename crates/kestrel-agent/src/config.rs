@@ -32,9 +32,15 @@ impl AgentConfig {
         }
 
         let raw: Raw = toml::from_str(s)?;
+        // PSK resolution order: explicit config > KESTREL_PSK_HEX env >
+        // system keyring. The env-var path exists so headless sandbox
+        // VMs (where no logged-in user means no keyring) can receive
+        // the PSK from a bootstrap channel (SSH SetEnv) without ever
+        // touching the disk on the guest. See kestrel-hub's
+        // sandbox_bootstrap module.
         let psk = match raw.agent.psk {
             Some(hex_str) => Zeroizing::new(hex::decode(&hex_str)?),
-            None => load_psk_from_keyring()?,
+            None => load_psk_from_env_or_keyring()?,
         };
         Ok(AgentConfig {
             listen: raw.agent.listen.parse()?,
@@ -48,6 +54,22 @@ impl AgentConfig {
     }
 }
 
+/// Resolve the PSK from KESTREL_PSK_HEX (if set + non-empty) or fall
+/// back to the system credential store. Lets headless sandboxes pass
+/// the PSK via ssh SetEnv without persisting it.
+fn load_psk_from_env_or_keyring() -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    if let Ok(hex_str) = std::env::var("KESTREL_PSK_HEX") {
+        let trimmed = hex_str.trim();
+        if !trimmed.is_empty() {
+            return Ok(Zeroizing::new(
+                hex::decode(trimmed)
+                    .map_err(|e| anyhow::anyhow!("KESTREL_PSK_HEX is not valid hex: {}", e))?,
+            ));
+        }
+    }
+    load_psk_from_keyring()
+}
+
 /// Read the PSK from the system credential store (where `kestrel-agent
 /// enroll` puts it). Returns the bytes wrapped in `Zeroizing` so they're
 /// wiped from memory when the binding drops.
@@ -56,7 +78,7 @@ fn load_psk_from_keyring() -> anyhow::Result<Zeroizing<Vec<u8>>> {
         .map_err(|e| anyhow::anyhow!("open keyring entry: {}", e))?;
     let hex_str = entry.get_password().map_err(|e| {
         anyhow::anyhow!(
-            "no `agent.psk` in config and no PSK in keyring: {} (run `kestrel-agent enroll` first)",
+            "no `agent.psk` in config, no KESTREL_PSK_HEX in env, and no PSK in keyring: {} (run `kestrel-agent enroll` first)",
             e
         )
     })?;

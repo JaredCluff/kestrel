@@ -11,6 +11,7 @@ pub mod oidc;
 pub mod policy;
 pub mod router;
 pub mod sandbox;
+pub mod sandbox_bootstrap;
 pub mod status;
 pub mod supervisor;
 pub mod transport;
