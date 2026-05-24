@@ -137,13 +137,25 @@ impl AppState {
         // for any T: Zeroize) and `Zeroizing<Vec<u8>>` (identity).
         let master_secret: Zeroizing<Vec<u8>> = master_secret.into();
         let session_key = Zeroizing::new(kestrel_proto::derive_session_signing_key(&master_secret));
+        let webrtc_sessions = crate::webrtc::SessionRegistry::new();
+        // Phase 13b: attach the SessionRegistry to NodeRegistry so the
+        // supervisor's webrtc_pump can deposit agent-originated
+        // SDP answers / ICE candidates as they arrive. Best-effort:
+        // attach is fire-and-forget; failure to attach (impossible
+        // unless we change the API to fallible) just means the dashboard
+        // never gets answers back.
+        let attach_reg = registry.clone();
+        let attach_sessions = webrtc_sessions.clone();
+        tokio::spawn(async move {
+            attach_reg.attach_webrtc_sessions(attach_sessions).await;
+        });
         AppState {
             registry,
             config_path,
             master_secret,
             session_key,
             layout,
-            webrtc_sessions: crate::webrtc::SessionRegistry::new(),
+            webrtc_sessions,
             policy: None,
             approvals: crate::policy::ApprovalRegistry::new(),
             oidc_providers: vec![],

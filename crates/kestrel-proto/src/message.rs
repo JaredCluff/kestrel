@@ -70,6 +70,19 @@ pub enum Payload {
     /// stays agnostic about plugin schemas.
     PluginCallReq { plugin: String, tool: String, args_json: String },
     PluginCallResp { result_json: String },
+    /// Phase 13b — WebRTC signalling. Variant 31.
+    /// Hub forwards a browser's SDP offer to the agent under a session
+    /// id minted by the hub's SessionRegistry. The agent constructs a
+    /// WebRtcSession, sets the remote description, and replies with
+    /// `WebRtcAnswer`. Variants 31-33 are wire-stable additions.
+    WebRtcOffer { session_id: String, sdp: String },
+    /// Phase 13b — WebRTC signalling. Variant 32.
+    WebRtcAnswer { session_id: String, sdp: String },
+    /// Phase 13b — WebRTC signalling. Variant 33.
+    /// `candidate` is a JSON-encoded RTCIceCandidateInit (matching the
+    /// browser-side and webrtc-rs shape). Flows both directions on the
+    /// same channel.
+    WebRtcIce { session_id: String, candidate: String },
 }
 
 /// Wire-side mirror of agent's PluginInfo. Lives in proto so both
@@ -544,5 +557,38 @@ mod tests {
             };
             assert_eq!(roundtrip(&msg), msg);
         }
+    }
+
+    #[test]
+    fn roundtrip_webrtc_signalling_variants() {
+        let offer = KestrelMessage {
+            stream_id: 7,
+            kind: MsgKind::Request,
+            payload: Payload::WebRtcOffer {
+                session_id: "rt-abc123".into(),
+                sdp: "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\n".into(),
+            },
+        };
+        assert_eq!(roundtrip(&offer), offer);
+
+        let answer = KestrelMessage {
+            stream_id: 7,
+            kind: MsgKind::Response,
+            payload: Payload::WebRtcAnswer {
+                session_id: "rt-abc123".into(),
+                sdp: "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n".into(),
+            },
+        };
+        assert_eq!(roundtrip(&answer), answer);
+
+        let ice = KestrelMessage {
+            stream_id: 7,
+            kind: MsgKind::Event,
+            payload: Payload::WebRtcIce {
+                session_id: "rt-abc123".into(),
+                candidate: r#"{"candidate":"candidate:1 1 udp 2113937151 192.168.1.5 53124 typ host","sdpMid":"0","sdpMLineIndex":0}"#.into(),
+            },
+        };
+        assert_eq!(roundtrip(&ice), ice);
     }
 }

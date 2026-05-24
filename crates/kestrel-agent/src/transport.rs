@@ -13,7 +13,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{accept_async_with_config, tungstenite::Message, tungstenite::protocol::WebSocketConfig};
 
-use crate::capabilities::{clipboard, input, screen, shell, shell::ShellManager};
+use crate::capabilities::{
+    clipboard, input, screen, shell, shell::ShellManager, webrtc_session,
+};
+use std::collections::HashMap;
 
 /// Coarse runtime check for "are we running as root on a Unix-ish OS?"
 /// Used by capability advertisement (Phase 8). Cross-platform safe —
@@ -229,6 +232,12 @@ async fn handle_conn(
     )
     .spawn();
 
+    // Phase 13b: per-connection WebRTC session map keyed by hub-minted
+    // session_id. Sessions outlive any single frame — ICE candidates
+    // arrive in trickled bursts after the SDP exchange completes.
+    let mut webrtc_sessions: HashMap<String, Arc<webrtc_session::WebRtcSession>> =
+        HashMap::new();
+
     // Message loop — select! on incoming frames and outgoing shell events
     loop {
         tokio::select! {
@@ -368,6 +377,50 @@ async fn handle_conn(
                             stream_id, kind: MsgKind::Response,
                             payload: Payload::PluginListResp { plugins: list },
                         })?)).await?;
+                    }
+                    Payload::WebRtcOffer { session_id, sdp } => {
+                        // Boot a screen-stream + RTCPeerConnection,
+                        // produce the SDP answer, and emit ICE candidates
+                        // back via event_tx. Failure is logged but
+                        // doesn't kill the connection — operators just
+                        // won't see video for that session.
+                        match webrtc_session::handle_offer(
+                            session_id.clone(),
+                            sdp,
+                            event_tx.clone(),
+                        ).await {
+                            Ok(session) => {
+                                webrtc_sessions.insert(session_id, session);
+                            }
+                            Err(e) => {
+                                tracing::warn!("webrtc handle_offer failed: {}", e);
+                                let _ = tx.send(Message::Binary(encode(&KestrelMessage {
+                                    stream_id, kind: MsgKind::Response,
+                                    payload: Payload::Error {
+                                        code: kestrel_proto::ErrorCode::Internal,
+                                        message: format!("webrtc setup failed: {}", e),
+                                    },
+                                })?)).await;
+                            }
+                        }
+                    }
+                    Payload::WebRtcIce { session_id, candidate } => {
+                        if let Some(session) = webrtc_sessions.get(&session_id) {
+                            if let Err(e) =
+                                webrtc_session::add_remote_ice(session, &candidate).await
+                            {
+                                tracing::warn!(
+                                    "webrtc add_ice for session {}: {}",
+                                    session_id,
+                                    e
+                                );
+                            }
+                        } else {
+                            tracing::debug!(
+                                "webrtc: ICE for unknown session {}",
+                                session_id
+                            );
+                        }
                     }
                     Payload::PluginCallReq { plugin, tool, args_json } => {
                         let response = match plugins.get(&plugin) {

@@ -47,7 +47,7 @@ pub fn spawn(
             }
 
             match transport::connect_with_world_sink(node_cfg.address, &*psk).await {
-                Ok((mut handle, actor_join, mut world_rx, mut caps_rx)) => {
+                Ok((mut handle, actor_join, mut world_rx, mut caps_rx, mut webrtc_rx)) => {
                     // Verify the agent's claimed hostname matches the
                     // configured node_id. With per-node PSKs (PR #29)
                     // mismatched ids fail authentication entirely, so
@@ -101,6 +101,17 @@ pub fn spawn(
                         }
                     });
 
+                    // Phase 13b: pump agent-originated WebRTC events
+                    // (SDP answers + ICE candidates) into the optional
+                    // SessionRegistry attached to the NodeRegistry. No-op
+                    // when no SessionRegistry is wired (test paths).
+                    let webrtc_registry = registry.clone();
+                    let webrtc_pump = tokio::spawn(async move {
+                        while let Some(event) = webrtc_rx.recv().await {
+                            webrtc_registry.record_webrtc_event(event).await;
+                        }
+                    });
+
                     // Wait for the actor to exit (connection closed / error).
                     let _ = actor_join.await;
                     // The world receiver drops with run_actor; the pump
@@ -109,6 +120,7 @@ pub fn spawn(
                     // pump hasn't woken up yet.
                     world_pump.abort();
                     caps_pump.abort();
+                    webrtc_pump.abort();
                     attempt = 1;
                     registry
                         .mark_disconnected(&node_cfg.node_id, attempt, backoff_for(0))

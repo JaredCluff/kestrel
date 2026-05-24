@@ -365,11 +365,25 @@ pub async fn webrtc_post_offer(
     axum::Json(body): axum::Json<WebrtcSdpBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
-    if state.webrtc_sessions.record_offer(&id, body.sdp_b64).await {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)))
+    // Store the offer locally so /api/webrtc/session/:id GET shows it
+    // even before the agent answers.
+    if !state.webrtc_sessions.record_offer(&id, body.sdp_b64.clone()).await {
+        return Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)));
     }
+    // Phase 13b: forward to the target agent so it can negotiate.
+    let Some(session) = state.webrtc_sessions.get(&id).await else {
+        return Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)));
+    };
+    let Some(handle) = state.registry.try_get(&session.node_id).await else {
+        // Agent not connected — session sits in OfferReceived. Browser
+        // can poll and timeout / show the error.
+        return Ok(StatusCode::ACCEPTED);
+    };
+    if let Err(e) = handle.send_webrtc_offer(id.clone(), body.sdp_b64).await {
+        tracing::warn!("forward offer to agent {}: {}", session.node_id, e);
+        return Err((StatusCode::BAD_GATEWAY, format!("forward to agent: {}", e)));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn webrtc_post_answer(
@@ -393,11 +407,19 @@ pub async fn webrtc_post_ice(
     axum::Json(body): axum::Json<WebrtcIceBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     check_auth(&state, &headers)?;
-    if state.webrtc_sessions.record_ice(&id, body.candidate_json).await {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)))
+    if !state.webrtc_sessions.record_ice(&id, body.candidate_json.clone()).await {
+        return Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)));
     }
+    // Phase 13b: forward browser ICE candidates to the agent too.
+    let Some(session) = state.webrtc_sessions.get(&id).await else {
+        return Err((StatusCode::NOT_FOUND, format!("session '{}' not found", id)));
+    };
+    if let Some(handle) = state.registry.try_get(&session.node_id).await {
+        if let Err(e) = handle.send_webrtc_ice(id, body.candidate_json).await {
+            tracing::warn!("forward ICE to agent {}: {}", session.node_id, e);
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn webrtc_get_session(
