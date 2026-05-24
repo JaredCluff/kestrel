@@ -109,6 +109,11 @@ jobs:
       - name: Install platform deps (Linux)
         if: runner.os == 'Linux'
         run: |
+          # AT-SPI / X11 / OpenSSL dev headers + nasm for openh264.
+          # rdev needs libxdo / libxtst; xcap needs libxcb.
+          # Xvfb gives us a headless display server so capability
+          # tests (clipboard, screen, input) actually exercise the
+          # X11 paths instead of skipping via has_display() == false.
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libatspi2.0-dev \
@@ -120,12 +125,27 @@ jobs:
             libdbus-1-dev \
             libssl-dev \
             pkg-config \
-            nasm
+            nasm \
+            xvfb \
+            xauth
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           cache-key: ${{ matrix.os }}-test
-      - name: Run tests
+      - name: Run tests (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        # xvfb-run wraps the command so $DISPLAY is set for its
+        # subprocess. -a auto-allocates a free display number.
+        # The 1280x1024x24 server-args matches a typical desktop
+        # so xcap returns realistic dimensions if a test reads them.
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            cargo test --workspace --no-fail-fast
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
+        # macOS capability tests stay skipped by default (TCC needs a
+        # real interactive grant); operators opt in by setting
+        # KESTREL_HEADFUL=1 on their dev box.
         run: cargo test --workspace --no-fail-fast
 
   coverage:

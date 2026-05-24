@@ -3004,6 +3004,7 @@ dependencies = [
  "hostname",
  "image",
  "kestrel-proto",
+ "kestrel-test",
  "keyring",
  "objc",
  "openh264",
