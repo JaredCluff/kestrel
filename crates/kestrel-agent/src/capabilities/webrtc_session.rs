@@ -14,19 +14,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use kestrel_proto::{KestrelMessage, MsgKind, Payload};
 use tokio::sync::mpsc;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::media::Sample;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
-use crate::capabilities::screen_stream::EncodedFrame;
+use crate::capabilities::screen_stream::{self, EncodedFrame};
 
 /// Construct a fresh RTCPeerConnection with default codecs + Google's
 /// public STUN. Operators with NAT'd networks should replace this
@@ -106,6 +109,93 @@ impl WebRtcSession {
         });
         Ok(Self { pc })
     }
+}
+
+/// Handle a `Payload::WebRtcOffer` arriving from the hub. Boots a
+/// screen capture stream, wires it through a new `WebRtcSession`,
+/// completes the SDP answer half of the negotiation, and registers an
+/// ICE-candidate handler that emits `Payload::WebRtcIce` events back
+/// to the hub via `event_tx`. Returns the constructed session so the
+/// caller can store it in its session map and route subsequent
+/// `WebRtcIce` frames into `add_ice_candidate`.
+///
+/// `display_index` / `target_fps` are hard-wired here for v1; making
+/// them browser-selectable is a documented follow-up.
+pub async fn handle_offer(
+    session_id: String,
+    offer_sdp: String,
+    event_tx: mpsc::Sender<KestrelMessage>,
+) -> anyhow::Result<Arc<WebRtcSession>> {
+    let frames = screen_stream::spawn(0, 30);
+    let session = Arc::new(WebRtcSession::new(frames).await?);
+
+    // Wire ICE-candidate emission back through event_tx as serialized
+    // RTCIceCandidateInit JSON (matches browser-side / webrtc-rs shape).
+    let pc = session.pc.clone();
+    let event_tx_for_ice = event_tx.clone();
+    let sid_for_ice = session_id.clone();
+    pc.on_ice_candidate(Box::new(move |cand| {
+        let event_tx = event_tx_for_ice.clone();
+        let sid = sid_for_ice.clone();
+        Box::pin(async move {
+            let Some(c) = cand else { return };
+            let init = match c.to_json() {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::warn!("webrtc: candidate.to_json: {}", e);
+                    return;
+                }
+            };
+            let candidate_json = match serde_json::to_string(&init) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("webrtc: serialize ICE candidate: {}", e);
+                    return;
+                }
+            };
+            let _ = event_tx
+                .send(KestrelMessage {
+                    stream_id: 0,
+                    kind: MsgKind::Event,
+                    payload: Payload::WebRtcIce {
+                        session_id: sid,
+                        candidate: candidate_json,
+                    },
+                })
+                .await;
+        })
+    }));
+
+    // Complete the answer half of the SDP exchange.
+    let offer = RTCSessionDescription::offer(offer_sdp)?;
+    session.pc.set_remote_description(offer).await?;
+    let answer = session.pc.create_answer(None).await?;
+    session.pc.set_local_description(answer.clone()).await?;
+
+    let _ = event_tx
+        .send(KestrelMessage {
+            stream_id: 0,
+            kind: MsgKind::Event,
+            payload: Payload::WebRtcAnswer {
+                session_id,
+                sdp: answer.sdp,
+            },
+        })
+        .await;
+
+    Ok(session)
+}
+
+/// Parse and feed a hub-forwarded ICE candidate into an existing
+/// session. Called from the agent transport on `Payload::WebRtcIce`.
+pub async fn add_remote_ice(
+    session: &WebRtcSession,
+    candidate_json: &str,
+) -> anyhow::Result<()> {
+    let init: RTCIceCandidateInit = serde_json::from_str(candidate_json)
+        .map_err(|e| anyhow::anyhow!("invalid RTCIceCandidateInit JSON: {}", e))?;
+    session.pc.add_ice_candidate(init).await?;
+    Ok(())
 }
 
 #[cfg(test)]

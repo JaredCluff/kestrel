@@ -52,6 +52,11 @@ pub struct NodeRegistry {
     /// `find_nodes_with` to back the `fleet_find` MCP tool.
     capabilities: Arc<RwLock<HashMap<String, Capabilities>>>,
     event_tx: tokio::sync::broadcast::Sender<NodeEvent>,
+    /// Phase 13b: optional WebRTC SessionRegistry. When wired (by
+    /// the dashboard at startup), the supervisor's webrtc_pump
+    /// folds agent-originated SDP answers / ICE candidates into it.
+    /// None for tests that don't exercise the WebRTC path.
+    webrtc_sessions: Arc<RwLock<Option<crate::webrtc::SessionRegistry>>>,
 }
 
 impl Default for NodeRegistry {
@@ -69,6 +74,32 @@ impl NodeRegistry {
             world: Arc::new(RwLock::new(HashMap::new())),
             capabilities: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            webrtc_sessions: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Phase 13b: hand the registry a SessionRegistry so the
+    /// supervisor's webrtc_pump knows where to deposit agent-originated
+    /// SDP answers / ICE candidates.
+    pub async fn attach_webrtc_sessions(&self, sessions: crate::webrtc::SessionRegistry) {
+        *self.webrtc_sessions.write().await = Some(sessions);
+    }
+
+    /// Phase 13b: route an inbound WebRtcEvent (forwarded by the
+    /// transport actor's `webrtc_tx`) into the attached SessionRegistry,
+    /// if one is wired. Best-effort: silently drops when no
+    /// SessionRegistry is attached, matching how `record_capabilities`
+    /// silently drops events on tear-down.
+    pub async fn record_webrtc_event(&self, event: crate::transport::WebRtcEvent) {
+        let guard = self.webrtc_sessions.read().await;
+        let Some(sessions) = guard.as_ref() else { return };
+        match event {
+            crate::transport::WebRtcEvent::Answer { session_id, sdp } => {
+                let _ = sessions.record_answer(&session_id, sdp).await;
+            }
+            crate::transport::WebRtcEvent::Ice { session_id, candidate } => {
+                let _ = sessions.record_ice(&session_id, candidate).await;
+            }
         }
     }
 
@@ -287,6 +318,14 @@ impl NodeRegistry {
         self.nodes.read().await.get(node_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("node '{}' not connected", node_id))
+    }
+
+    /// Phase 13b: like `get`, but Option-typed for callers that want to
+    /// branch on connection state instead of treating it as an error.
+    /// The dashboard's WebRTC relay uses this — a disconnected agent
+    /// shouldn't 5xx the browser, it should pend (HTTP 202).
+    pub async fn try_get(&self, node_id: &str) -> Option<NodeHandle> {
+        self.nodes.read().await.get(node_id).cloned()
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<NodeEvent> {

@@ -97,6 +97,16 @@ enum ActorCmd {
 
 type WsStream = WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
+/// Phase 13b: agent-originated WebRTC signalling messages routed back
+/// through `run_actor`'s `webrtc_tx` side channel so the hub can fold
+/// them into its SessionRegistry. Variant per inbound payload that
+/// belongs to the SDP/ICE exchange.
+#[derive(Debug, Clone)]
+pub enum WebRtcEvent {
+    Answer { session_id: String, sdp: String },
+    Ice { session_id: String, candidate: String },
+}
+
 /// Phase 6: callers of `run_actor` can opt-in to side channels that
 /// receive every `Payload::WorldUpdate` and `Payload::Capabilities`
 /// the agent pushes post-handshake. Supervisor wires these to the
@@ -107,6 +117,7 @@ async fn run_actor(
     mut cmd_rx: mpsc::Receiver<ActorCmd>,
     world_tx: Option<mpsc::UnboundedSender<kestrel_proto::WorldState>>,
     caps_tx: Option<mpsc::UnboundedSender<kestrel_proto::Capabilities>>,
+    webrtc_tx: Option<mpsc::UnboundedSender<WebRtcEvent>>,
 ) {
     let (mut tx, mut rx) = ws.split();
     let mut pending: HashMap<u32, oneshot::Sender<anyhow::Result<KestrelMessage>>> = HashMap::new();
@@ -191,6 +202,26 @@ async fn run_actor(
                                 // updates received post-handshake.
                                 if let Some(tx) = caps_tx.as_ref() {
                                     let _ = tx.send(caps.clone());
+                                }
+                            }
+                            Payload::WebRtcAnswer { session_id, sdp } => {
+                                // Phase 13b signalling relay: agent's
+                                // SDP answer flows back through the
+                                // hub-side WebRtcEvent channel for the
+                                // SessionRegistry to record.
+                                if let Some(tx) = webrtc_tx.as_ref() {
+                                    let _ = tx.send(WebRtcEvent::Answer {
+                                        session_id: session_id.clone(),
+                                        sdp: sdp.clone(),
+                                    });
+                                }
+                            }
+                            Payload::WebRtcIce { session_id, candidate } => {
+                                if let Some(tx) = webrtc_tx.as_ref() {
+                                    let _ = tx.send(WebRtcEvent::Ice {
+                                        session_id: session_id.clone(),
+                                        candidate: candidate.clone(),
+                                    });
                                 }
                             }
                             _ => {}
@@ -391,6 +422,22 @@ impl NodeHandle {
         reply_rx.await.map_err(|_| anyhow::anyhow!("actor dropped reply"))
     }
 
+    // ── Phase 13b WebRTC signalling relay ─────────────────────────────────────
+
+    /// Forward a browser-originated SDP offer to the agent. The agent
+    /// replies with `Payload::WebRtcAnswer`, routed through the actor's
+    /// caps_tx-style side channel (see `caps_tx` for the analogous
+    /// pattern) — in this PR the answer arrives back via the
+    /// `webrtc_tx` channel returned from `connect_with_world_sink`.
+    pub async fn send_webrtc_offer(&self, session_id: String, sdp: String) -> anyhow::Result<()> {
+        self.fire(Payload::WebRtcOffer { session_id, sdp }).await
+    }
+
+    /// Forward a browser-originated ICE candidate to the agent.
+    pub async fn send_webrtc_ice(&self, session_id: String, candidate: String) -> anyhow::Result<()> {
+        self.fire(Payload::WebRtcIce { session_id, candidate }).await
+    }
+
     /// Spawn a shell, run `command`, wait for exit, return all output as UTF-8.
     /// Timeout: 30 seconds.
     pub async fn run_shell(&self, command: &str) -> anyhow::Result<String> {
@@ -422,11 +469,13 @@ pub async fn connect(
     addr: SocketAddr,
     psk: &[u8],
 ) -> anyhow::Result<(NodeHandle, tokio::task::JoinHandle<()>)> {
-    let (handle, actor_join, _world_rx, _caps_rx) = connect_with_world_sink(addr, psk).await?;
+    let (handle, actor_join, _world_rx, _caps_rx, _webrtc_rx) =
+        connect_with_world_sink(addr, psk).await?;
     // Caller didn't want the side channels — drain to /dev/null so the
     // actor's send doesn't pile up unsent items.
     drop(_world_rx);
     drop(_caps_rx);
+    drop(_webrtc_rx);
     Ok((handle, actor_join))
 }
 
@@ -443,6 +492,7 @@ pub async fn connect_with_world_sink(
     tokio::task::JoinHandle<()>,
     mpsc::UnboundedReceiver<kestrel_proto::WorldState>,
     mpsc::UnboundedReceiver<kestrel_proto::Capabilities>,
+    mpsc::UnboundedReceiver<WebRtcEvent>,
 )> {
     let tls = tls_connect(addr).await?;
 
@@ -469,13 +519,21 @@ pub async fn connect_with_world_sink(
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     let (world_tx, world_rx) = mpsc::unbounded_channel();
     let (caps_tx, caps_rx) = mpsc::unbounded_channel();
-    let actor_join = tokio::spawn(run_actor(ws, cmd_rx, Some(world_tx), Some(caps_tx)));
+    let (webrtc_tx, webrtc_rx) = mpsc::unbounded_channel();
+    let actor_join = tokio::spawn(run_actor(
+        ws,
+        cmd_rx,
+        Some(world_tx),
+        Some(caps_tx),
+        Some(webrtc_tx),
+    ));
 
     Ok((
         NodeHandle { node_id, os_info, displays, capabilities, cmd_tx },
         actor_join,
         world_rx,
         caps_rx,
+        webrtc_rx,
     ))
 }
 
