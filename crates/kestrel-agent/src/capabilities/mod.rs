@@ -6,4 +6,5 @@ pub mod plugins;
 pub mod screen;
 pub mod screen_stream;
 pub mod shell;
+pub mod webrtc_session;
 pub mod world;
