@@ -5,22 +5,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use kestrel_hub::dashboard::{router, AppState};
 use kestrel_hub::router::NodeRegistry;
+use kestrel_test::{starter_toml, test_psk};
 use tower::ServiceExt;
-
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    let contents = r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#;
-    std::fs::write(&path, contents).unwrap();
-    path
-}
 
 #[tokio::test]
 async fn post_node_then_delete_node_round_trip_updates_config_and_supervisors() {

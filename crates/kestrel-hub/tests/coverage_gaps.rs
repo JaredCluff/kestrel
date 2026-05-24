@@ -30,10 +30,7 @@ use std::time::Duration;
 use kestrel_agent::config::AgentConfig;
 use kestrel_hub::router::NodeRegistry;
 use kestrel_hub::transport::connect;
-
-fn test_psk() -> Vec<u8> {
-    b"kestrel-test-psk-32bytes-padded!".to_vec()
-}
+use kestrel_test::test_psk;
 
 /// Spawn an agent in its own runtime + thread. Drop the returned
 /// handle (via `shutdown()`) to forcibly terminate the agent.

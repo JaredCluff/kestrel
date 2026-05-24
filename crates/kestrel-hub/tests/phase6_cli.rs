@@ -1,15 +1,5 @@
 use kestrel_hub::config::{HubConfig, add_node, load_doc, remove_node, save_doc, set_layout};
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    let contents = r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#;
-    std::fs::write(&path, contents).unwrap();
-    path
-}
+use kestrel_test::starter_toml;
 
 #[test]
 fn add_then_list_then_remove_round_trip() {

@@ -45,6 +45,7 @@ eventsource-client = { workspace = true }
 
 [dev-dependencies]
 kestrel-agent = { path = "../kestrel-agent" }
+kestrel-test  = { path = "../kestrel-test" }
 tokio         = { workspace = true }
 tempfile      = { workspace = true }
 tower         = { workspace = true, features = ["util"] }

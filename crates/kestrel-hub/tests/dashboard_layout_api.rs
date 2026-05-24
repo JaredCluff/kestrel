@@ -21,27 +21,10 @@ use axum::http::{Request, StatusCode};
 use kestrel_hub::dashboard::{router, AppState};
 use kestrel_hub::kvm;
 use kestrel_hub::router::NodeRegistry;
+use kestrel_test::{starter_toml, test_master};
 use tower::ServiceExt;
 
 const TOKEN: &str = "test-control-token-layout-aaaaaa";
-
-fn test_master() -> Vec<u8> {
-    b"kestrel-test-master-32bytes-pad!".to_vec()
-}
-
-fn starter_toml(dir: &std::path::Path) -> std::path::PathBuf {
-    let path = dir.join("kestrel.toml");
-    std::fs::write(
-        &path,
-        r#"
-[hub]
-listen_mcp       = "stdio"
-listen_dashboard = "0.0.0.0:7273"
-"#,
-    )
-    .unwrap();
-    path
-}
 
 fn build_app() -> (axum::Router, AppState, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();

@@ -1,0 +1,23 @@
+[package]
+name    = "kestrel-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Shared test fixtures for the kestrel workspace. Lives in its own
+# crate (not a `tests/common/` module) because cargo treats every
+# `tests/*.rs` file as a separate binary — a sibling `common.rs` would
+# either be re-compiled per test or live under each crate's
+# `mod common` boilerplate. A dev-dep crate solves it once.
+#
+# Crates depend on this only as a `dev-dependencies` so the production
+# binaries don't pull in test-only state.
+
+[dependencies]
+kestrel-agent  = { path = "../kestrel-agent" }
+kestrel-hub    = { path = "../kestrel-hub" }
+kestrel-proto  = { path = "../kestrel-proto" }
+axum           = { workspace = true }
+tokio          = { workspace = true }
+tempfile       = { workspace = true }
+zeroize        = { workspace = true }
