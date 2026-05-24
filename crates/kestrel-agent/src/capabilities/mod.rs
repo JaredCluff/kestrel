@@ -4,5 +4,6 @@ pub mod encoder;
 pub mod input;
 pub mod plugins;
 pub mod screen;
+pub mod screen_stream;
 pub mod shell;
 pub mod world;
