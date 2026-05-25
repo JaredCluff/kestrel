@@ -7,10 +7,10 @@
 #   - clippy:  `cargo clippy --workspace --all-targets -- -D warnings`
 #   - test:    `cargo test --workspace`
 #
-# Matrix covers macOS (arm64) and Linux (x86_64). Windows is left out
-# of CI for now — the workspace builds on Windows but the GitHub-hosted
-# runner image takes long enough that we'd be paying for slow signal
-# on a platform almost nobody tests against day-to-day.
+# Matrix covers macOS (arm64), Linux (x86_64), and Windows (x86_64).
+# All three are required to pass — Windows was previously soft-failed
+# while platform-specific issues were shaken out, but the per-OS gates
+# in the workspace now build cleanly on all three runners.
 
 name: ci
 
@@ -37,10 +37,6 @@ jobs:
   check:
     name: cargo check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Windows is experimental — soft-fail so it doesn't block PRs
-    # while we shake out platform-specific issues. Once it passes
-    # consistently on a few PRs in a row, remove this conditional.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -85,7 +81,6 @@ jobs:
   clippy:
     name: cargo clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -123,7 +118,6 @@ jobs:
   test:
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:

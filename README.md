@@ -114,6 +114,50 @@ Sub-second interactive screen streaming. Signalling layer + browser-side JS clie
 - Wayland mouse position (Wayland intentionally doesn't expose this; X11 fallback is a TODO)
 - Linux focused-app via AT-SPI returns the first application as a proxy for active; refining to true-active is a follow-up
 
+## Building from source
+
+Kestrel builds natively on macOS (Apple Silicon and Intel), Linux (x86_64), and Windows (x86_64). Each developer builds on their own machine — the project is not cross-compiled, and release tarballs ship per-platform binaries.
+
+Common to all platforms: stable Rust (`rustup toolchain install stable`) and the `OPENH264_FROM_SOURCE=1` environment variable so the `openh264` crate compiles the upstream C source instead of trying to download Cisco's prebuilt binary at build time.
+
+### Prerequisites
+
+**macOS (Apple Silicon or Intel)**
+
+    xcode-select --install          # clang + linker
+    brew install nasm               # openh264 build needs nasm
+    export OPENH264_FROM_SOURCE=1
+
+**Linux (Debian / Ubuntu)**
+
+    sudo apt-get install -y \
+        libatspi2.0-dev libxdo-dev libxtst-dev \
+        libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev \
+        libdbus-1-dev libssl-dev pkg-config nasm
+    export OPENH264_FROM_SOURCE=1
+
+The dev headers cover: AT-SPI (accessibility tree), libxdo / libxtst (synthetic input via `rdev`), libxcb (screen capture via `xcap`), libdbus (system keyring via `keyring`), and OpenSSL. `nasm` is the assembler the openh264 source build invokes. Other distros: the package names will differ but the libraries are the same.
+
+**Windows (x86_64)**
+
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) (the "Desktop development with C++" workload — supplies `cl.exe` + the MSVC linker) and put `nasm` on PATH (`choco install nasm` is the easiest path; the chocolatey installer drops it under `C:\Program Files\NASM`).
+
+    setx OPENH264_FROM_SOURCE 1     # persists across shells; restart your terminal
+
+### Build + package
+
+Once the prereqs are in place, build a distributable tarball (mac / linux) or zip (windows):
+
+    # macOS / Linux
+    ./packaging/build-release.sh
+
+    # Windows (PowerShell)
+    .\packaging\build-release.ps1
+
+Output lands in `dist/kestrel-<version>-<target>.{tar.gz,zip}` and contains both binaries plus `install.sh` / `install.ps1`. Unzip / untar on the target machine and run the install script (defaults to `/usr/local/bin` on Unix, `%LOCALAPPDATA%\Programs\kestrel\bin` on Windows; override with `PREFIX=` or `-Prefix`).
+
+For a quick `cargo install` straight onto the dev machine without packaging, the system keyring + dashboard setup below works directly.
+
 ## Setup
 
 On the hub host:

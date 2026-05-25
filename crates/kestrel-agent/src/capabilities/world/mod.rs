@@ -296,11 +296,19 @@ fn fingerprint(bytes: &[u8]) -> String {
 
 /// Cheap socket-existence probe (duplicates transport.rs's helper
 /// for cross-module reuse — the world observer doesn't depend on
-/// transport).
+/// transport). Windows arm returns false; see transport.rs for the
+/// named-pipe TODO.
 fn docker_socket_present() -> bool {
-    ["/var/run/docker.sock", "/run/docker.sock"]
-        .iter()
-        .any(|p| std::path::Path::new(p).exists())
+    #[cfg(unix)]
+    {
+        ["/var/run/docker.sock", "/run/docker.sock"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// Compute a screen fingerprint by sampling the primary display

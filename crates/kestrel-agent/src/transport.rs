@@ -43,14 +43,25 @@ unsafe extern "C" {
 /// Best-effort docker probe. Checks the standard daemon socket
 /// paths; doesn't catch remote DOCKER_HOST configs.
 fn docker_socket_present() -> bool {
-    let candidates = [
-        "/var/run/docker.sock",
-        "/run/docker.sock",
-        // macOS Docker Desktop puts its socket under the user dir.
-        // We don't try to resolve $HOME — Desktop also bridges
-        // /var/run, so the first check covers most users.
-    ];
-    candidates.iter().any(|p| std::path::Path::new(p).exists())
+    #[cfg(unix)]
+    {
+        let candidates = [
+            "/var/run/docker.sock",
+            "/run/docker.sock",
+            // macOS Docker Desktop puts its socket under the user dir.
+            // We don't try to resolve $HOME — Desktop also bridges
+            // /var/run, so the first check covers most users.
+        ];
+        candidates.iter().any(|p| std::path::Path::new(p).exists())
+    }
+    // Windows Docker Desktop exposes \\.\pipe\docker_engine, which
+    // isn't probeable via Path::exists. Reporting `has_docker: false`
+    // until we wire a named-pipe open; the agent still runs fine and
+    // the capability just won't advertise Docker on Windows.
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 use crate::config::AgentConfig;
 

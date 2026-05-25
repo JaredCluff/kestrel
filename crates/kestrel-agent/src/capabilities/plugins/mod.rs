@@ -200,7 +200,11 @@ pub async fn discover_and_spawn() -> HashMap<String, PluginHandle> {
 }
 
 fn plugins_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
+    // HOME on Unix, USERPROFILE on Windows. Checking both in order means
+    // the function doesn't need a cfg-split and stays testable on either
+    // platform when one var happens to be unset.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))?;
     Some(PathBuf::from(home).join(".kestrel").join("plugins"))
 }
 
@@ -229,11 +233,15 @@ mod tests {
 
     #[test]
     fn plugins_dir_uses_home() {
-        // Smoke: when HOME is set, we get a path. We don't assert
-        // the literal value because the test runner's HOME varies.
-        if std::env::var_os("HOME").is_some() {
+        // Smoke: when HOME (Unix) or USERPROFILE (Windows) is set, we
+        // get a path. We don't assert the literal value because the
+        // test runner's home dir varies. The trailing path component
+        // uses MAIN_SEPARATOR so this passes on Windows too.
+        if std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some() {
             let dir = plugins_dir().unwrap();
-            assert!(dir.to_string_lossy().ends_with(".kestrel/plugins"));
+            let sep = std::path::MAIN_SEPARATOR;
+            let suffix = format!(".kestrel{sep}plugins");
+            assert!(dir.to_string_lossy().ends_with(&suffix));
         }
     }
 
